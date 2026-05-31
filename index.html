@@ -1,0 +1,1726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ledger — Budget Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+/* ============================================================
+   DESIGN TOKENS  — colours, fonts, spacing live here so the
+   whole app stays consistent. Change a value once, it updates
+   everywhere.
+   ============================================================ */
+:root{
+  --paper:#f5f1e8;            /* warm background, like ledger paper */
+  --paper-2:#fbf8f1;          /* slightly lighter card surface */
+  --ink:#23201a;             /* main text */
+  --ink-soft:#6b6457;         /* secondary text */
+  --line:#ddd5c4;            /* hairline rules */
+  --line-strong:#c9bfa8;
+  --accent:#9c4322;          /* terracotta — buttons, highlights */
+  --accent-soft:#c97a52;
+  --good:#3f6f4a;            /* income / positive */
+  --warn:#b5532a;
+  --danger:#a8362b;
+  --shadow:0 1px 2px rgba(35,32,26,.06),0 8px 24px rgba(35,32,26,.08);
+  --radius:14px;
+  --radius-sm:9px;
+  --serif:'Fraunces',Georgia,serif;
+  --sans:'Hanken Grotesk',-apple-system,sans-serif;
+
+  /* Parent-category colours, reused across every view & chart */
+  --c-food:#c4622d;
+  --c-transport:#3f6f7a;
+  --c-health:#5a7d4f;
+  --c-personal:#a8688f;
+  --c-fun:#c79a2b;
+  --c-shopping:#8a5a9e;
+  --c-travel:#3d6ca8;
+  --c-bills:#6b6457;
+  --c-fees:#94402f;
+  --c-income:#3f6f4a;
+  --c-invest:#52786e;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:var(--sans);
+  background:var(--paper);
+  color:var(--ink);
+  font-size:15px;
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+/* faint paper grain for atmosphere */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:radial-gradient(rgba(156,67,34,.025) 1px,transparent 1px);
+  background-size:5px 5px;opacity:.6;
+}
+.tab-nums{font-variant-numeric:tabular-nums}
+
+/* ============================================================
+   TOP BAR + NAVIGATION
+   ============================================================ */
+header{
+  position:sticky;top:0;z-index:40;
+  background:rgba(245,241,232,.9);backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line);
+}
+.bar{
+  max-width:1240px;margin:0 auto;padding:0 20px;
+  display:flex;align-items:center;gap:24px;height:64px;
+}
+.brand{display:flex;align-items:center;gap:10px;flex-shrink:0;text-decoration:none;color:var(--ink)}
+.brand .mark{
+  width:34px;height:34px;border-radius:9px;background:var(--ink);color:var(--paper);
+  display:grid;place-items:center;font-family:var(--serif);font-weight:600;font-size:20px;
+}
+.brand .name{font-family:var(--serif);font-size:23px;font-weight:600;letter-spacing:-.01em}
+nav{display:flex;gap:2px;overflow-x:auto;flex:1;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+.nav-btn{
+  font:inherit;font-size:14px;font-weight:500;color:var(--ink-soft);
+  background:none;border:none;cursor:pointer;padding:8px 13px;border-radius:8px;
+  white-space:nowrap;display:flex;align-items:center;gap:7px;transition:.15s;
+}
+.nav-btn:hover{background:rgba(156,67,34,.07);color:var(--ink)}
+.nav-btn.active{background:var(--ink);color:var(--paper)}
+.badge{
+  background:var(--danger);color:#fff;font-size:11px;font-weight:700;
+  min-width:18px;height:18px;border-radius:9px;padding:0 5px;
+  display:none;place-items:center;
+}
+.badge.show{display:grid}
+.nav-btn.active .badge{background:var(--paper);color:var(--danger)}
+
+.sync{
+  flex-shrink:0;display:flex;align-items:center;gap:7px;font-size:12.5px;
+  color:var(--ink-soft);padding:6px 11px;border:1px solid var(--line);border-radius:20px;
+}
+.sync .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-soft);transition:.2s}
+.sync.saving .dot{background:var(--accent-soft);animation:pulse 1s infinite}
+.sync.saved .dot{background:var(--good)}
+@keyframes pulse{50%{opacity:.3}}
+
+/* ============================================================
+   LAYOUT
+   ============================================================ */
+main{max-width:1240px;margin:0 auto;padding:32px 20px 80px;position:relative;z-index:1}
+.panel{display:none;animation:fade .3s ease}
+.panel.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.page-head{margin-bottom:26px}
+.page-head h1{font-family:var(--serif);font-size:34px;font-weight:600;letter-spacing:-.02em}
+.page-head p{color:var(--ink-soft);margin-top:4px;max-width:60ch}
+
+.card{
+  background:var(--paper-2);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:var(--shadow);padding:24px;margin-bottom:20px;
+}
+.card h2{font-family:var(--serif);font-size:22px;font-weight:600;margin-bottom:4px}
+.card .sub{color:var(--ink-soft);font-size:13.5px;margin-bottom:18px}
+.card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+
+/* ============================================================
+   BUTTONS + FORM CONTROLS
+   ============================================================ */
+.btn{
+  font:inherit;font-size:14px;font-weight:600;cursor:pointer;
+  padding:9px 16px;border-radius:9px;border:1px solid transparent;transition:.15s;
+  display:inline-flex;align-items:center;gap:7px;white-space:nowrap;
+}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#883a1d}
+.btn-ghost{background:transparent;border-color:var(--line-strong);color:var(--ink)}
+.btn-ghost:hover{background:rgba(35,32,26,.04)}
+.btn-danger{background:transparent;border-color:var(--danger);color:var(--danger)}
+.btn-danger:hover{background:var(--danger);color:#fff}
+.btn-sm{padding:5px 10px;font-size:12.5px;border-radius:7px}
+.icon-btn{
+  background:none;border:none;cursor:pointer;color:var(--ink-soft);padding:5px;border-radius:6px;
+  font-size:15px;line-height:1;transition:.15s;
+}
+.icon-btn:hover{background:rgba(35,32,26,.07);color:var(--ink)}
+
+label{display:block;font-size:13px;font-weight:600;color:var(--ink-soft);margin-bottom:5px}
+input,select,textarea{
+  font:inherit;font-size:14px;width:100%;padding:9px 12px;color:var(--ink);
+  background:var(--paper);border:1px solid var(--line-strong);border-radius:9px;transition:.15s;
+}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(156,67,34,.12)}
+.field{margin-bottom:16px}
+.row{display:flex;gap:14px;flex-wrap:wrap}
+.row>.field{flex:1;min-width:140px}
+.checkline{display:flex;align-items:center;gap:9px;margin-bottom:10px;cursor:pointer}
+.checkline input{width:auto}
+.checkline label{margin:0;cursor:pointer;color:var(--ink);font-weight:500}
+
+/* ============================================================
+   TABLES + LISTS
+   ============================================================ */
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-soft);
+   font-weight:700;padding:10px 12px;border-bottom:2px solid var(--line-strong)}
+td{padding:11px 12px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:none}
+.acct-item{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:14px 16px;border:1px solid var(--line);border-radius:11px;margin-bottom:10px;background:var(--paper);
+}
+.acct-item .meta{display:flex;flex-direction:column;gap:2px}
+.acct-item .nm{font-weight:600;font-size:15px}
+.acct-item .det{font-size:12.5px;color:var(--ink-soft)}
+.pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:20px;
+  background:rgba(35,32,26,.06);color:var(--ink-soft)}
+.pill.cur{background:rgba(63,111,74,.12);color:var(--good)}
+
+/* category manager */
+.cat-parent{border:1px solid var(--line);border-radius:11px;margin-bottom:12px;overflow:hidden;background:var(--paper)}
+.cat-parent-head{
+  display:flex;align-items:center;gap:12px;padding:13px 16px;cursor:pointer;user-select:none;
+}
+.cat-parent-head:hover{background:rgba(35,32,26,.03)}
+.cat-swatch{width:13px;height:13px;border-radius:4px;flex-shrink:0}
+.cat-parent-head .pname{font-family:var(--serif);font-size:17px;font-weight:600;flex:1}
+.cat-parent-head .count{font-size:12px;color:var(--ink-soft)}
+.cat-parent-head .chev{transition:.2s;color:var(--ink-soft)}
+.cat-parent.open .chev{transform:rotate(90deg)}
+.cat-subs{display:none;padding:4px 16px 12px;border-top:1px solid var(--line)}
+.cat-parent.open .cat-subs{display:block}
+.cat-sub{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.cat-sub:last-child{border-bottom:none}
+.cat-sub .sname{flex:1;font-size:14px}
+.cat-tag{font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:5px;letter-spacing:.03em}
+.cat-tag.income{background:rgba(63,111,74,.15);color:var(--good)}
+.cat-tag.invest{background:rgba(82,120,110,.15);color:var(--c-invest)}
+.cat-tag.excluded{background:rgba(107,100,87,.15);color:var(--ink-soft)}
+
+/* ============================================================
+   EMPTY STATES
+   ============================================================ */
+.empty{text-align:center;padding:48px 20px;color:var(--ink-soft)}
+.empty .big{font-size:40px;margin-bottom:12px;opacity:.5}
+.empty h3{font-family:var(--serif);font-size:20px;color:var(--ink);margin-bottom:6px}
+
+/* dashboard stat cards */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:8px}
+.stat{background:var(--paper-2);border:1px solid var(--line);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow)}
+.stat .k{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft);font-weight:700}
+.stat .v{font-family:var(--serif);font-size:32px;font-weight:600;margin-top:6px;letter-spacing:-.02em}
+.stat .v.small{font-size:22px}
+
+/* placeholder for not-yet-built sections */
+.soon{text-align:center;padding:60px 20px;color:var(--ink-soft)}
+.soon .big{font-size:44px;opacity:.4;margin-bottom:14px}
+.soon h3{font-family:var(--serif);font-size:24px;color:var(--ink);margin-bottom:8px}
+.soon .tag{display:inline-block;margin-top:14px;font-size:12px;font-weight:700;letter-spacing:.05em;
+  text-transform:uppercase;padding:5px 12px;border:1px dashed var(--line-strong);border-radius:20px}
+
+/* ============================================================
+   MODAL + TOAST + CONFIRM
+   ============================================================ */
+.overlay{
+  position:fixed;inset:0;background:rgba(35,32,26,.45);backdrop-filter:blur(2px);
+  z-index:100;display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto;
+}
+.overlay.show{display:flex}
+.modal{
+  background:var(--paper-2);border-radius:var(--radius);box-shadow:0 20px 60px rgba(35,32,26,.3);
+  width:100%;max-width:520px;animation:pop .25s ease;
+}
+@keyframes pop{from{opacity:0;transform:scale(.96) translateY(10px)}to{opacity:1;transform:none}}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:20px 24px;border-bottom:1px solid var(--line)}
+.modal-head h3{font-family:var(--serif);font-size:21px;font-weight:600}
+.modal-body{padding:24px}
+.modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:16px 24px;border-top:1px solid var(--line)}
+
+#toasts{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:10px;align-items:center}
+.toast{
+  background:var(--ink);color:var(--paper);padding:12px 20px;border-radius:11px;font-size:14px;font-weight:500;
+  box-shadow:0 10px 30px rgba(35,32,26,.3);animation:slideup .3s ease;display:flex;align-items:center;gap:10px;
+}
+.toast.good{background:var(--good)}
+.toast.bad{background:var(--danger)}
+@keyframes slideup{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+
+@media(max-width:640px){
+  .bar{gap:12px;padding:0 14px}
+  .brand .name{display:none}
+  main{padding:22px 14px 70px}
+  .page-head h1{font-size:27px}
+  .card{padding:18px}
+}
+
+/* ledger */
+.ledger-filters{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px}
+.ledger-filters .fg{display:flex;flex-direction:column;gap:4px}
+.ledger-filters label{margin:0;font-size:11px}
+.ledger-filters input,.ledger-filters select{padding:7px 10px;font-size:13px;width:auto;min-width:120px}
+.ledger-filters input[type=date]{min-width:140px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;padding:7px 12px;
+  border-radius:20px;border:1px solid var(--line-strong);cursor:pointer;background:var(--paper);color:var(--ink)}
+.chip.on{background:var(--danger);color:#fff;border-color:var(--danger)}
+.ledger-table-wrap{overflow-x:auto}
+.ledger-table-wrap table{min-width:880px}
+.ledger-table-wrap th{cursor:pointer;user-select:none;white-space:nowrap}
+.ledger-table-wrap th .arr{opacity:.5;font-size:10px}
+.ledger-table-wrap tbody tr{cursor:pointer}
+.ledger-table-wrap tbody tr:hover{background:rgba(156,67,34,.04)}
+.ledger-table-wrap tr.review{background:rgba(168,54,43,.05)}
+.ledger-table-wrap tr.excluded td:not(.keep){opacity:.55}
+.ledger-table-wrap td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.inline-cat{padding:4px 6px;font-size:12.5px;min-width:130px;max-width:160px}
+.flag-toggle{cursor:pointer;font-size:14px;padding:1px 2px;border-radius:4px;filter:grayscale(1);opacity:.35;transition:.12s}
+.flag-toggle.on{filter:none;opacity:1}
+.flag-toggle:hover{background:rgba(35,32,26,.08)}
+.bulk-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--ink);color:var(--paper);
+  padding:10px 16px;border-radius:11px;margin-bottom:14px;animation:slideup .2s}
+.bulk-bar .btn-sm{padding:5px 10px}
+.pager{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:16px;color:var(--ink-soft);font-size:13px}
+
+/* breakdown + chart controls */
+.bd-controls{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+.bd-controls .fg{display:flex;flex-direction:column;gap:4px}
+.bd-controls label{margin:0;font-size:11px}
+.bd-controls input,.bd-controls select{padding:7px 10px;font-size:13px;width:auto}
+.bd-wrap{overflow-x:auto}
+.bd-table{width:100%;border-collapse:collapse;font-size:13px;min-width:600px}
+.bd-table th,.bd-table td{padding:8px 12px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.bd-table th:first-child,.bd-table td:first-child{text-align:left;position:sticky;left:0;background:var(--paper-2);z-index:1}
+.bd-table thead th{position:sticky;top:0;background:var(--paper-2);border-bottom:2px solid var(--line-strong);
+  font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);z-index:2}
+.bd-table thead th:first-child{z-index:3}
+.bd-table .total-col{font-weight:700;border-right:2px solid var(--line-strong)}
+.bd-parent td{font-weight:700;border-top:1px solid var(--line-strong);background:rgba(35,32,26,.025)}
+.bd-parent td:first-child{background:rgba(35,32,26,.04)}
+.bd-sub td{color:var(--ink)}
+.bd-sub td:first-child{padding-left:26px;color:var(--ink-soft)}
+.bd-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;vertical-align:middle}
+.bd-section-label{padding:12px;font-family:var(--serif);font-size:15px;font-weight:600;background:var(--paper);
+  border-top:2px solid var(--line-strong);color:var(--ink-soft)}
+.bd-excluded td{color:var(--ink-soft);font-style:italic}
+.chart-card{background:var(--paper-2);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:20px}
+.chart-card h2{font-family:var(--serif);font-size:20px;font-weight:600;margin-bottom:16px}
+.chart-box{position:relative;height:340px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="bar">
+    <a class="brand" href="#" onclick="return false">
+      <span class="mark">L</span>
+      <span class="name">Ledger</span>
+    </a>
+    <nav id="nav"></nav>
+    <div class="sync" id="sync"><span class="dot"></span><span id="syncText">Local</span></div>
+  </div>
+</header>
+
+<main>
+  <!-- DASHBOARD -->
+  <section class="panel" data-view="dashboard">
+    <div class="page-head"><h1>Dashboard</h1><p>A quick read on where things stand.</p></div>
+    <div class="stats" id="dashStats"></div>
+    <div id="dashEmpty"></div>
+  </section>
+
+  <!-- TRANSACTIONS -->
+  <section class="panel" data-view="transactions">
+    <div class="page-head"><h1>Transactions</h1><p>Your full ledger. Click any row to edit it.</p></div>
+    <div class="card">
+      <div class="ledger-filters" id="ledgerFilters"></div>
+      <div id="bulkBar"></div>
+      <div id="ledgerTable"></div>
+      <div id="ledgerPager"></div>
+    </div>
+  </section>
+
+  <!-- BREAKDOWN -->
+  <section class="panel" data-view="breakdown">
+    <div class="page-head"><h1>Breakdown</h1><p>Month-by-month spending, by category — your spreadsheet, kept current.</p></div>
+    <div class="card"><div class="bd-controls" id="bdControls"></div></div>
+    <div class="card" style="padding:0;overflow:hidden"><div id="bdTable" class="bd-wrap"></div></div>
+  </section>
+
+  <!-- CHARTS -->
+  <section class="panel" data-view="charts">
+    <div class="page-head"><h1>Charts</h1><p>See the shape of your spending.</p></div>
+    <div class="card"><div class="bd-controls" id="chartControls"></div></div>
+    <div id="chartsArea"></div>
+  </section>
+
+  <!-- IMPORT -->
+  <section class="panel" data-view="import">
+    <div class="page-head"><h1>Import</h1><p>Load transactions from your bank's CSV files.</p></div>
+    <div id="importArea"></div>
+  </section>
+
+  <!-- TRUTH TABLE -->
+  <section class="panel" data-view="truth">
+    <div class="page-head"><h1>Truth Table</h1><p>Keyword rules that auto-sort your transactions into categories. The topmost matching rule wins.</p></div>
+    <div class="card">
+      <div class="card-head">
+        <div style="flex:1;min-width:220px">
+          <input id="truthSearch" placeholder="Search rules…" oninput="renderTruthTable()" style="max-width:320px">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="reapplyTruth()">↻ Re-apply to all</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportTruthCsv()">⬇ Export CSV</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('truthCsvFile').click()">⬆ Import CSV</button>
+          <button class="btn btn-primary btn-sm" onclick="openRuleModal()">+ Add rule</button>
+        </div>
+      </div>
+      <input type="file" id="truthCsvFile" accept=".csv" style="display:none" onchange="importTruthCsv(event)">
+      <div id="truthList"></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="panel" data-view="settings">
+    <div class="page-head"><h1>Settings</h1><p>Manage your accounts, categories, and backups.</p></div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Accounts</h2><div class="sub">The bank accounts and credit cards you track.</div></div>
+        <button class="btn btn-primary" onclick="openAccountModal()">+ Add account</button>
+      </div>
+      <div id="acctList"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Categories</h2><div class="sub">Click a category to expand its subcategories.</div></div>
+        <button class="btn btn-primary" onclick="openCategoryModal()">+ Add subcategory</button>
+      </div>
+      <div id="catList"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Data &amp; Backups</h2><div class="sub">Save a copy of everything, or restore from one.</div></div>
+      </div>
+      <div class="row" style="margin-top:4px">
+        <button class="btn btn-ghost" onclick="exportJSON()">⬇ Export all data (backup)</button>
+        <button class="btn btn-ghost" onclick="exportTxnsCsv()">⬇ Export transactions (CSV)</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('importJsonFile').click()">⬆ Restore from backup</button>
+        <button class="btn btn-ghost" onclick="downloadCsvTemplate()">📄 Download CSV template</button>
+      </div>
+      <input type="file" id="importJsonFile" accept=".json" style="display:none" onchange="importJSON(event)">
+      <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)">
+        Your data lives in this browser for now. In Phase 5 we'll sync it to Google Drive so your phone and computer share it.
+      </p>
+    </div>
+  </section>
+</main>
+
+<!-- generic modal -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <div class="modal-head"><h3 id="modalTitle">Title</h3><button class="icon-btn" onclick="closeModal()" style="font-size:22px">×</button></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+/* ============================================================
+   1. THE DATA STORE
+   Everything the app knows lives in one object called `state`.
+   We read it from the browser's storage on launch and write it
+   back whenever something changes. Later (Phase 5) the same
+   save()/load() will also talk to Google Drive — the rest of the
+   app won't need to change.
+   ============================================================ */
+const STORAGE_KEY = 'ledger_budget_data';
+
+/* make a unique ID for accounts, categories, etc. */
+function uid(){
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,9);
+}
+
+/* ---- SEED DATA: loaded the very first time the app opens ---- */
+const PARENT_ORDER = ['Food & Drink','Transportation','Health & Wellness','Personal Care',
+  'Entertainment & Recreation','Shopping & Gifts','Travel','Bills','Fees','Income','Investments'];
+
+const PARENT_COLORS = {
+  'Food & Drink':'var(--c-food)','Transportation':'var(--c-transport)','Health & Wellness':'var(--c-health)',
+  'Personal Care':'var(--c-personal)','Entertainment & Recreation':'var(--c-fun)','Shopping & Gifts':'var(--c-shopping)',
+  'Travel':'var(--c-travel)','Bills':'var(--c-bills)','Fees':'var(--c-fees)','Income':'var(--c-income)','Investments':'var(--c-invest)'
+};
+
+function seedCategories(){
+  const rows = [
+    ['Food & Drink','Restaurant'],['Food & Drink','Bubble Tea'],['Food & Drink','Groceries'],
+    ['Transportation','Gas'],['Transportation','Car Maintenance'],['Transportation','Tolls & Parking'],['Transportation','Shared Transport'],
+    ['Health & Wellness','Health Insurance'],['Health & Wellness','Gym Membership'],['Health & Wellness','Health & Physical Therapy'],['Health & Wellness','Medicine'],
+    ['Personal Care','Haircut'],['Personal Care','Hygiene Products'],['Personal Care','Pets'],
+    ['Entertainment & Recreation','Concerts & Events'],['Entertainment & Recreation','Subscriptions'],['Entertainment & Recreation','Video Games'],['Entertainment & Recreation','Entertainment'],['Entertainment & Recreation','Sports Equipment'],['Entertainment & Recreation','Vibes'],
+    ['Shopping & Gifts','Clothing & Accessories'],['Shopping & Gifts','Electronics'],['Shopping & Gifts','Gifts'],
+    ['Travel','Airfare'],['Travel','Hotels'],['Travel','Car Rentals'],['Travel','Tours & Activities'],['Travel','Travel Other'],
+    ['Bills','Phone'],['Bills','Water'],['Bills','Gas (Utility)'],
+    ['Fees','Student Loan'],['Fees','Card Payments'],['Fees','Bank Fees'],['Fees','Cash Withdrawal'],
+    ['Income','Salary',{isIncome:true}],['Income','Student Payment',{isIncome:true}],['Income','Cash Deposit',{isIncome:true}],
+    ['Investments','Crypto',{isInvestment:true}],['Investments','Investment Contribution',{isInvestment:true}],
+  ];
+  return rows.map((r,i)=>{
+    const extra = r[2]||{};
+    return {
+      id:uid(), parent:r[0], name:r[1],
+      countsTowardSpending: !(extra.isIncome||extra.isInvestment),
+      isIncome: !!extra.isIncome, isInvestment: !!extra.isInvestment,
+      sortOrder:i
+    };
+  });
+}
+
+function freshData(){
+  return { version:1, accounts:[], transactions:[], categories:seedCategories(), truthTable:[], settings:{} };
+}
+
+let state = freshData();
+
+const Store = {
+  load(){
+    let raw=null;
+    try{ raw = localStorage.getItem(STORAGE_KEY); }catch(e){ /* preview sandboxes may block storage */ }
+    if(raw){
+      try{ state = JSON.parse(raw); }
+      catch(e){ toast('Saved data was unreadable — starting fresh','bad'); state=freshData(); }
+    } else {
+      state = freshData();
+      this.save(true);
+    }
+  },
+  save(silent){
+    setSync('saving');
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    catch(e){ /* preview may block; the downloaded file works fine */ }
+    // tiny delay so the "Saving…" state is visible, then flips to Saved
+    clearTimeout(this._t);
+    this._t = setTimeout(()=>setSync('saved'), 250);
+  }
+};
+
+/* sync indicator in the top-right */
+function setSync(stateName){
+  const el=document.getElementById('sync'), t=document.getElementById('syncText');
+  el.className='sync '+stateName;
+  t.textContent = stateName==='saving' ? 'Saving…' : (stateName==='saved' ? 'Saved ✓' : 'Local');
+}
+
+/* ============================================================
+   2. FINAL AMOUNT  — the single source of truth for "how much
+   did this transaction actually cost me", used everywhere later.
+   Rule order we agreed on:
+     work expense  -> 0
+     adjusted set  -> the adjusted value
+     otherwise     -> the raw spent amount
+   ============================================================ */
+function finalAmount(txn){
+  if(txn.flags && txn.flags.workExpense) return 0;
+  if(txn.adjusted !== null && txn.adjusted !== undefined && txn.adjusted !== '') return Number(txn.adjusted);
+  return Number(txn.spent)||0;
+}
+
+/* helpers */
+function money(n){
+  const v = Number(n)||0;
+  return (v<0?'-$':'$') + Math.abs(v).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function parentOf(catName){
+  const c = state.categories.find(c=>c.name===catName);
+  return c ? c.parent : null;
+}
+
+/* ============================================================
+   3. NAVIGATION
+   ============================================================ */
+const VIEWS = [
+  {id:'dashboard', label:'Dashboard', icon:'◆'},
+  {id:'transactions', label:'Transactions', icon:'≡', badge:true},
+  {id:'breakdown', label:'Breakdown', icon:'▦'},
+  {id:'charts', label:'Charts', icon:'▲'},
+  {id:'import', label:'Import', icon:'↓'},
+  {id:'truth', label:'Truth Table', icon:'✦'},
+  {id:'settings', label:'Settings', icon:'⚙'},
+];
+let currentView='dashboard';
+
+function buildNav(){
+  const nav=document.getElementById('nav');
+  nav.innerHTML='';
+  VIEWS.forEach(v=>{
+    const b=document.createElement('button');
+    b.className='nav-btn'+(v.id===currentView?' active':'');
+    b.innerHTML = `<span style="opacity:.7">${v.icon}</span> ${v.label}` +
+      (v.badge?` <span class="badge" id="navBadge">0</span>`:'');
+    b.onclick=()=>switchView(v.id);
+    nav.appendChild(b);
+  });
+  updateBadge();
+  const badge=document.getElementById('navBadge');
+  if(badge) badge.onclick=(e)=>{ e.stopPropagation(); clearLedgerFilters(); ledger.needsReview=true; switchView('transactions'); };
+}
+function switchView(id){
+  currentView=id;
+  document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.dataset.view===id));
+  buildNav();
+  if(id==='dashboard') renderDashboard();
+  if(id==='settings'){ renderAccounts(); renderCategories(); }
+  if(id==='truth') renderTruthTable();
+  if(id==='import') renderImportStart();
+  if(id==='transactions') renderLedger();
+  if(id==='breakdown') renderBreakdown();
+  if(id==='charts') renderCharts();
+}
+function updateBadge(){
+  const n = state.transactions.filter(t=>t.flags && t.flags.needsReview).length;
+  const b=document.getElementById('navBadge');
+  if(b){ b.textContent=n; b.classList.toggle('show', n>0); }
+}
+
+/* ============================================================
+   4. DASHBOARD
+   ============================================================ */
+function renderDashboard(){
+  const wrap=document.getElementById('dashStats');
+  const empty=document.getElementById('dashEmpty');
+  const txns=state.transactions;
+  if(txns.length===0){
+    wrap.innerHTML='';
+    empty.innerHTML=`<div class="empty"><div class="big">🪴</div>
+      <h3>No transactions yet</h3>
+      <p>Once you import some statements (Phase 2), your monthly summary appears here.<br>
+      For now, head to <b>Settings</b> to set up your accounts.</p></div>`;
+    return;
+  }
+  empty.innerHTML='';
+  // (real stats arrive in Phase 3 — placeholder counts for now)
+  const reviewN = txns.filter(t=>t.flags&&t.flags.needsReview).length;
+  wrap.innerHTML=`
+    <div class="stat"><div class="k">Transactions</div><div class="v">${txns.length}</div></div>
+    <div class="stat"><div class="k">Accounts</div><div class="v">${state.accounts.length}</div></div>
+    <div class="stat"><div class="k">Needs review</div><div class="v" style="color:var(--danger)">${reviewN}</div></div>`;
+}
+
+/* ============================================================
+   5. ACCOUNT MANAGER
+   ============================================================ */
+const ACCT_TYPES={credit:'Credit Card',chequing:'Chequing',us_chequing:'US Chequing',other:'Other'};
+
+function renderAccounts(){
+  const el=document.getElementById('acctList');
+  if(state.accounts.length===0){
+    el.innerHTML=`<div class="empty" style="padding:30px"><div class="big">🏦</div>
+      <h3>No accounts yet</h3><p>Add your first bank account or credit card to get started.</p></div>`;
+    return;
+  }
+  el.innerHTML = state.accounts.map(a=>{
+    const cards = (a.cardNumbers||[]).filter(Boolean);
+    const txCount = state.transactions.filter(t=>t.accountId===a.id).length;
+    return `<div class="acct-item">
+      <div class="meta">
+        <div class="nm">${esc(a.name)}</div>
+        <div class="det">${ACCT_TYPES[a.type]||a.type} · ${txCount} transaction${txCount===1?'':'s'}${cards.length?' · '+cards.map(esc).join(', '):''}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="pill cur">${a.currency||'CAD'}</span>
+        <button class="icon-btn" title="Edit" onclick="openAccountModal('${a.id}')">✎</button>
+        <button class="icon-btn" title="Delete" onclick="deleteAccount('${a.id}')">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openAccountModal(id){
+  const a = id ? state.accounts.find(x=>x.id===id) : null;
+  setModal(a?'Edit account':'Add account', `
+    <div class="field"><label>Account name</label>
+      <input id="m_name" placeholder="e.g. TD Visa" value="${a?esc(a.name):''}"></div>
+    <div class="row">
+      <div class="field"><label>Type</label>
+        <select id="m_type">
+          ${Object.entries(ACCT_TYPES).map(([k,v])=>`<option value="${k}" ${a&&a.type===k?'selected':''}>${v}</option>`).join('')}
+        </select></div>
+      <div class="field"><label>Currency</label>
+        <select id="m_cur">
+          <option value="CAD" ${!a||a.currency==='CAD'?'selected':''}>CAD</option>
+          <option value="USD" ${a&&a.currency==='USD'?'selected':''}>USD</option>
+        </select></div>
+    </div>
+    <div class="field"><label>Card number(s) — optional, comma-separated</label>
+      <input id="m_cards" placeholder="4500********8572, 4500********1234" value="${a&&a.cardNumbers?esc(a.cardNumbers.join(', ')):''}"></div>
+    <div class="field"><label>Notes — optional</label>
+      <textarea id="m_notes" rows="2">${a?esc(a.notes||''):''}</textarea></div>
+  `, [
+    {label:'Cancel', cls:'btn-ghost', fn:closeModal},
+    {label: a?'Save changes':'Add account', cls:'btn-primary', fn:()=>saveAccount(id)}
+  ]);
+  setTimeout(()=>document.getElementById('m_name').focus(),50);
+}
+
+function saveAccount(id){
+  const name=val('m_name').trim();
+  if(!name){ toast('Please enter an account name','bad'); return; }
+  const cards = val('m_cards').split(',').map(s=>s.trim()).filter(Boolean);
+  const rec={ name, type:val('m_type'), currency:val('m_cur'), cardNumbers:cards, notes:val('m_notes').trim() };
+  if(id){ Object.assign(state.accounts.find(a=>a.id===id), rec); toast('Account updated','good'); }
+  else { rec.id=uid(); state.accounts.push(rec); toast('Account added','good'); }
+  Store.save(); closeModal(); renderAccounts();
+}
+
+function deleteAccount(id){
+  const a=state.accounts.find(x=>x.id===id);
+  const n=state.transactions.filter(t=>t.accountId===id).length;
+  const msg = n>0
+    ? `<b>${esc(a.name)}</b> has ${n} transaction${n===1?'':'s'}. Deleting the account will also delete ${n===1?'it':'them'}. This cannot be undone.`
+    : `Delete <b>${esc(a.name)}</b>? This cannot be undone.`;
+  confirmDialog('Delete account', msg, ()=>{
+    state.transactions = state.transactions.filter(t=>t.accountId!==id);
+    state.accounts = state.accounts.filter(x=>x.id!==id);
+    Store.save(); renderAccounts(); updateBadge(); toast('Account deleted');
+  });
+}
+
+/* ============================================================
+   6. CATEGORY MANAGER
+   ============================================================ */
+let openParents = {};
+
+function renderCategories(){
+  const el=document.getElementById('catList');
+  // group subcategories under their parent, in defined order
+  const parents = [...new Set(state.categories.map(c=>c.parent))]
+    .sort((a,b)=>{
+      const ia=PARENT_ORDER.indexOf(a), ib=PARENT_ORDER.indexOf(b);
+      return (ia<0?99:ia)-(ib<0?99:ib);
+    });
+  el.innerHTML = parents.map(p=>{
+    const subs = state.categories.filter(c=>c.parent===p).sort((a,b)=>a.sortOrder-b.sortOrder);
+    const color = PARENT_COLORS[p]||'var(--ink-soft)';
+    const open = openParents[p];
+    return `<div class="cat-parent ${open?'open':''}">
+      <div class="cat-parent-head" onclick="toggleParent('${esc(p)}')">
+        <span class="cat-swatch" style="background:${color}"></span>
+        <span class="pname">${esc(p)}</span>
+        <span class="count">${subs.length}</span>
+        <span class="chev">▶</span>
+      </div>
+      <div class="cat-subs">
+        ${subs.map(s=>`<div class="cat-sub">
+          <span class="sname">${esc(s.name)}</span>
+          ${s.isIncome?'<span class="cat-tag income">Income</span>':''}
+          ${s.isInvestment?'<span class="cat-tag invest">Investment</span>':''}
+          ${(!s.countsTowardSpending&&!s.isIncome&&!s.isInvestment)?'<span class="cat-tag excluded">Excluded</span>':''}
+          <button class="icon-btn" title="Edit" onclick="event.stopPropagation();openCategoryModal('${s.id}')">✎</button>
+          <button class="icon-btn" title="Delete" onclick="event.stopPropagation();deleteCategory('${s.id}')">🗑</button>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+function toggleParent(p){ openParents[p]=!openParents[p]; renderCategories(); }
+
+function openCategoryModal(id){
+  const c = id ? state.categories.find(x=>x.id===id) : null;
+  const parents = [...new Set(state.categories.map(x=>x.parent))];
+  setModal(c?'Edit subcategory':'Add subcategory', `
+    <div class="field"><label>Parent category</label>
+      <select id="m_parent">
+        ${parents.map(p=>`<option ${c&&c.parent===p?'selected':''}>${esc(p)}</option>`).join('')}
+        <option value="__new__">+ New parent category…</option>
+      </select></div>
+    <div class="field" id="newParentField" style="display:none"><label>New parent name</label>
+      <input id="m_newparent" placeholder="e.g. Education"></div>
+    <div class="field"><label>Subcategory name</label>
+      <input id="m_catname" placeholder="e.g. Coffee" value="${c?esc(c.name):''}"></div>
+    <label style="margin-bottom:10px">Behaviour</label>
+    <div class="checkline"><input type="checkbox" id="m_counts" ${!c||c.countsTowardSpending?'checked':''}><label for="m_counts">Counts toward spending</label></div>
+    <div class="checkline"><input type="checkbox" id="m_income" ${c&&c.isIncome?'checked':''}><label for="m_income">This is income</label></div>
+    <div class="checkline"><input type="checkbox" id="m_invest" ${c&&c.isInvestment?'checked':''}><label for="m_invest">This is an investment</label></div>
+  `, [
+    {label:'Cancel', cls:'btn-ghost', fn:closeModal},
+    {label:c?'Save changes':'Add subcategory', cls:'btn-primary', fn:()=>saveCategory(id)}
+  ]);
+  const sel=document.getElementById('m_parent');
+  sel.onchange=()=>{ document.getElementById('newParentField').style.display = sel.value==='__new__'?'block':'none'; };
+}
+
+function saveCategory(id){
+  let parent=val('m_parent');
+  if(parent==='__new__'){ parent=val('m_newparent').trim(); if(!parent){ toast('Enter a parent name','bad'); return; } }
+  const name=val('m_catname').trim();
+  if(!name){ toast('Enter a subcategory name','bad'); return; }
+  const counts=document.getElementById('m_counts').checked;
+  const isIncome=document.getElementById('m_income').checked;
+  const isInvestment=document.getElementById('m_invest').checked;
+  if(id){
+    Object.assign(state.categories.find(c=>c.id===id), {parent,name,countsTowardSpending:counts,isIncome,isInvestment});
+    toast('Category updated','good');
+  } else {
+    const maxOrder=Math.max(0,...state.categories.map(c=>c.sortOrder||0));
+    state.categories.push({id:uid(),parent,name,countsTowardSpending:counts,isIncome,isInvestment,sortOrder:maxOrder+1});
+    toast('Category added','good');
+  }
+  openParents[parent]=true;
+  Store.save(); closeModal(); renderCategories();
+}
+
+function deleteCategory(id){
+  const c=state.categories.find(x=>x.id===id);
+  const n=state.transactions.filter(t=>t.categoryId===id).length;
+  const r=state.truthTable.filter(t=>t.categoryId===id).length;
+  let extra='';
+  if(n>0) extra+=`<br><br>⚠️ ${n} transaction${n===1?'':'s'} use${n===1?'s':''} this category; they'll become uncategorized and flagged for review.`;
+  if(r>0) extra+=`<br>⚠️ ${r} truth-table rule${r===1?'':'s'} point${r===1?'s':''} here and will be removed.`;
+  confirmDialog('Delete category', `Delete <b>${esc(c.name)}</b>?${extra}`, ()=>{
+    state.transactions.forEach(t=>{ if(t.categoryId===id){ t.categoryId=null; t.flags=t.flags||{}; t.flags.needsReview=true; } });
+    state.truthTable=state.truthTable.filter(t=>t.categoryId!==id);
+    state.categories=state.categories.filter(x=>x.id!==id);
+    Store.save(); renderCategories(); updateBadge(); toast('Category deleted');
+  });
+}
+
+/* ============================================================
+   7. DATA EXPORT / IMPORT
+   ============================================================ */
+function exportJSON(){
+  const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
+  download(blob, `ledger-backup-${todayStr()}.json`);
+  toast('Backup downloaded','good');
+}
+function importJSON(e){
+  const file=e.target.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=()=>{
+    let parsed;
+    try{ parsed=JSON.parse(reader.result); }
+    catch(err){ toast('That file is not valid JSON','bad'); return; }
+    if(!parsed.categories || !Array.isArray(parsed.accounts)){ toast('That file does not look like a Ledger backup','bad'); return; }
+    confirmDialog('Restore backup','This will <b>replace everything</b> currently in the app with the contents of this file. Continue?',()=>{
+      state=parsed; Store.save(); renderAccounts(); renderCategories(); updateBadge(); toast('Backup restored','good');
+    });
+  };
+  reader.readAsText(file);
+  e.target.value='';
+}
+function downloadCsvTemplate(){
+  const blob=new Blob(['Date,Description,Spent,Credit,CardNumber\n'],{type:'text/csv'});
+  download(blob,'ledger-import-template.csv');
+  toast('Template downloaded','good');
+}
+
+/* ============================================================
+   7b. CATEGORY LOOKUP HELPERS  (categories are referenced by id)
+   ============================================================ */
+function catById(id){ return state.categories.find(c=>c.id===id)||null; }
+function catName(id){ const c=catById(id); return c?c.name:null; }
+function catParent(id){ const c=catById(id); return c?c.parent:null; }
+function catIdByName(name){ const c=state.categories.find(c=>c.name===name); return c?c.id:null; }
+function parentSort(a,b){ const ia=PARENT_ORDER.indexOf(a),ib=PARENT_ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib); }
+
+/* a grouped <select> of every category, value = category id */
+function categoryOptions(selectedId){
+  const parents=[...new Set(state.categories.map(c=>c.parent))].sort(parentSort);
+  let html='<option value="">— Uncategorized —</option>';
+  parents.forEach(p=>{
+    const subs=state.categories.filter(c=>c.parent===p).sort((a,b)=>a.sortOrder-b.sortOrder);
+    html+=`<optgroup label="${esc(p)}">`+subs.map(s=>
+      `<option value="${s.id}" ${s.id===selectedId?'selected':''}>${esc(s.name)}</option>`).join('')+`</optgroup>`;
+  });
+  return html;
+}
+
+/* ============================================================
+   7c. TRUTH TABLE  — the auto-categorization rules
+   ============================================================ */
+function seedTruthTable(){
+  const map=[
+    ['Arajet','Airfare'],['United Airlines','Airfare'],['Skyairlines','Airfare'],['Latam Airlin','Airfare'],
+    ['AIR TRANS','Airfare'],['FLAIR DIR','Airfare'],['American Ai','Airfare'],['AIRCANADA','Airfare'],
+    ['AMERICAN 000','Airfare'],['LP LATAM','Airfare'],
+    ['Chatime','Bubble Tea'],['Kung Fu Tea','Bubble Tea'],['Coco Fresh Tea','Bubble Tea'],['The Alley','Bubble Tea'],
+    ['Real Fruit Bubb','Bubble Tea'],['Tiger Sugar','Bubble Tea'],['Bubble Te','Bubble Tea'],['Presotea','Bubble Tea'],
+    ['Hi Tea','Bubble Tea'],['Bubbletea','Bubble Tea'],['Gong Cha','Bubble Tea'],
+    ['Oil Changers','Car Maintenance'],['Air-Serv','Car Maintenance'],['Assured Markham','Car Maintenance'],['Triple A Tire','Car Maintenance'],
+    ['Alamo rent-a-car','Car Rentals'],['Thrifty','Car Rentals'],
+    ['ATM Withdrawal','Cash Withdrawal'],
+    ['Hollister','Clothing & Accessories'],['Uniqlo','Clothing & Accessories'],['Winners','Clothing & Accessories'],
+    ['eddie bauer','Clothing & Accessories'],['Club Futbol MTY','Clothing & Accessories'],['Marshalls','Clothing & Accessories'],
+    ['Old Navy','Clothing & Accessories'],['Rock Atoll','Clothing & Accessories'],["Hudson's Bay",'Clothing & Accessories'],
+    ['PAYMENT THANK YOU','Card Payments'],['PAIEMENT MERCI','Card Payments'],
+    ['BRANCH TRANSACTION INTEREST','Bank Fees'],['INTEREST CHARGES','Bank Fees'],['PAYMENT PROTECTOR','Bank Fees'],
+  ];
+  return map.map(([keyword,name])=>({ id:uid(), keyword, categoryId:catIdByName(name), matchType:'contains' }));
+}
+
+/* find the first rule whose keyword appears in the description */
+function categorize(description){
+  const desc=(description||'').toLowerCase();
+  for(const rule of state.truthTable){
+    if(rule.keyword && desc.includes(rule.keyword.toLowerCase())) return rule;
+  }
+  return null;
+}
+
+/* apply auto-flags + categorization to one transaction (used on import & re-apply) */
+function autoProcess(txn, opts){
+  opts=opts||{};
+  const desc=(txn.description||'').toLowerCase();
+  const f=txn.flags;
+  let review=false, excluded=false;
+  if(desc.includes('payment thank you')||desc.includes('paiement merci')){ f.isInterAccountTransfer=true; excluded=true; }
+  if(desc.includes('branch transaction interest')||desc.includes('network transaction fe')||
+     desc.includes('network fee discount')||desc.includes('bonus interest')){ f.isBalancing=true; excluded=true; }
+  if(desc.includes('service charge')){ f.isBalancing=true; excluded=true; review=true; }
+  if(desc.includes('e-transfer')){ f.eTransferMethod=true; review=true; }
+  if(desc.includes('preauthorized debit')){ review=true; }
+
+  // categorize — but never overwrite a category the user set by hand
+  const rule = categorize(txn.description);
+  if(rule && !(opts.preserveManual && txn.manualCategory)){
+    txn.categoryId = rule.categoryId;
+  }
+  const hasCat = !!txn.categoryId;
+  if(excluded && !review) f.needsReview=false;
+  else if(!hasCat) f.needsReview=true;
+  else f.needsReview = review;
+}
+
+function renderTruthTable(){
+  const el=document.getElementById('truthList');
+  const q=(document.getElementById('truthSearch').value||'').toLowerCase();
+  const rules = state.truthTable
+    .map((r,i)=>({r,i}))
+    .filter(({r})=> !q || (r.keyword||'').toLowerCase().includes(q) || (catName(r.categoryId)||'').toLowerCase().includes(q));
+  if(state.truthTable.length===0){
+    el.innerHTML=`<div class="empty" style="padding:30px"><div class="big">🔮</div><h3>No rules yet</h3><p>Add a rule to start auto-categorizing.</p></div>`;
+    return;
+  }
+  el.innerHTML=`<table><thead><tr>
+    <th style="width:50px">#</th><th>Keyword (contains)</th><th>Category</th><th>Parent</th><th style="width:120px">Order</th><th style="width:90px"></th>
+  </tr></thead><tbody>${
+    rules.map(({r,i})=>`<tr>
+      <td style="color:var(--ink-soft)">${i+1}</td>
+      <td><b>${esc(r.keyword)}</b></td>
+      <td>${r.categoryId?esc(catName(r.categoryId)||'(missing)'):'<span style="color:var(--danger)">unset</span>'}</td>
+      <td style="color:var(--ink-soft)">${esc(catParent(r.categoryId)||'')}</td>
+      <td>
+        <button class="icon-btn" title="Move up" onclick="moveRule(${i},-1)" ${i===0?'disabled style=opacity:.3':''}>▲</button>
+        <button class="icon-btn" title="Move down" onclick="moveRule(${i},1)" ${i===state.truthTable.length-1?'disabled style=opacity:.3':''}>▼</button>
+      </td>
+      <td>
+        <button class="icon-btn" title="Edit" onclick="openRuleModal('${r.id}')">✎</button>
+        <button class="icon-btn" title="Delete" onclick="deleteRule('${r.id}')">🗑</button>
+      </td>
+    </tr>`).join('')
+  }</tbody></table>
+  <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)">${state.truthTable.length} rule${state.truthTable.length===1?'':'s'}. Rules are checked top to bottom — the first keyword found in a description wins, so put more specific keywords higher.</p>`;
+}
+
+function moveRule(i,dir){
+  const j=i+dir;
+  if(j<0||j>=state.truthTable.length) return;
+  const arr=state.truthTable;
+  [arr[i],arr[j]]=[arr[j],arr[i]];
+  Store.save(); renderTruthTable();
+}
+
+function openRuleModal(id){
+  const r = id ? state.truthTable.find(x=>x.id===id) : null;
+  setModal(r?'Edit rule':'Add rule', `
+    <div class="field"><label>Keyword to look for (case-insensitive)</label>
+      <input id="r_kw" placeholder="e.g. ESSO CIRCLE K" value="${r?esc(r.keyword):''}"></div>
+    <div class="field"><label>Assign this category</label>
+      <select id="r_cat">${categoryOptions(r?r.categoryId:null)}</select></div>
+    <p style="font-size:12.5px;color:var(--ink-soft)">Any transaction whose description contains this keyword will be filed under the chosen category.</p>
+  `, [
+    {label:'Cancel',cls:'btn-ghost',fn:closeModal},
+    {label:r?'Save rule':'Add rule',cls:'btn-primary',fn:()=>saveRule(id)}
+  ]);
+  setTimeout(()=>document.getElementById('r_kw').focus(),50);
+}
+function saveRule(id){
+  const kw=val('r_kw').trim();
+  const categoryId=val('r_cat')||null;
+  if(!kw){ toast('Enter a keyword','bad'); return; }
+  if(!categoryId){ toast('Pick a category','bad'); return; }
+  if(id){ Object.assign(state.truthTable.find(x=>x.id===id),{keyword:kw,categoryId}); }
+  else { state.truthTable.unshift({id:uid(),keyword:kw,categoryId,matchType:'contains'}); }
+  const filed=applyRulesToReview();
+  Store.save(); updateBadge(); closeModal(); renderTruthTable();
+  toast(`Rule saved${filed?` — ${filed} review item${filed===1?'':'s'} auto-filed`:''}`,'good');
+}
+
+/* re-check only the transactions that still need review; if a rule now
+   matches, file it and clear the review flag. Never touches anything the
+   user already categorized. Called automatically whenever rules change. */
+function applyRulesToReview(){
+  let changed=0;
+  state.transactions.forEach(t=>{
+    if(!(t.flags && t.flags.needsReview)) return;
+    const rule=categorize(t.description);
+    if(rule){ t.categoryId=rule.categoryId; t.flags.needsReview=false; changed++; }
+  });
+  return changed;
+}
+function deleteRule(id){
+  const r=state.truthTable.find(x=>x.id===id);
+  confirmDialog('Delete rule',`Delete the rule for <b>${esc(r.keyword)}</b>?`,()=>{
+    state.truthTable=state.truthTable.filter(x=>x.id!==id);
+    Store.save(); renderTruthTable(); toast('Rule deleted');
+  });
+}
+function reapplyTruth(){
+  const targets=state.transactions.filter(t=> (t.flags&&t.flags.needsReview) || !t.categoryId );
+  if(state.transactions.length===0){ toast('No transactions to categorize yet','bad'); return; }
+  confirmDialog('Re-apply truth table',
+    `This re-checks the ${targets.length} transaction${targets.length===1?'':'s'} that are uncategorized or need review against your current rules. Manually-set categories are left untouched. Continue?`,
+    ()=>{
+      let changed=0;
+      targets.forEach(t=>{ if(t.manualCategory) return; const before=t.categoryId; autoProcess(t,{preserveManual:true}); if(t.categoryId!==before) changed++; });
+      Store.save(); updateBadge(); renderTruthTable();
+      toast(`Re-applied — ${changed} transaction${changed===1?'':'s'} updated`,'good');
+    });
+}
+function exportTruthCsv(){
+  const lines=['Keyword,Category'];
+  state.truthTable.forEach(r=>{
+    const c=(catName(r.categoryId)||'').replace(/"/g,'""');
+    const k=(r.keyword||'').replace(/"/g,'""');
+    lines.push(`"${k}","${c}"`);
+  });
+  download(new Blob([lines.join('\n')],{type:'text/csv'}),'ledger-truth-table.csv');
+  toast('Truth table exported','good');
+}
+function importTruthCsv(e){
+  const file=e.target.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=()=>{
+    const rows=parseCsv(reader.result);
+    const valid=rows.filter(r=>r[0]&&r[0].trim());
+    if(valid.length===0){ toast('No rules found in that file','bad'); e.target.value=''; return; }
+    setModal('Import truth table', `<p style="margin-bottom:16px">Found <b>${valid.length}</b> rule${valid.length===1?'':'s'}. How should they be added?</p>
+      <p style="font-size:13px;color:var(--ink-soft)">Merge keeps your existing rules and adds new keywords. Replace deletes all current rules first.</p>`, [
+      {label:'Cancel',cls:'btn-ghost',fn:()=>{closeModal();}},
+      {label:'Merge',cls:'btn-ghost',fn:()=>applyTruthImport(valid,false)},
+      {label:'Replace all',cls:'btn-danger',fn:()=>applyTruthImport(valid,true)},
+    ]);
+  };
+  reader.readAsText(file); e.target.value='';
+}
+function applyTruthImport(rows,replace){
+  if(replace) state.truthTable=[];
+  const existing=new Set(state.truthTable.map(r=>(r.keyword||'').toLowerCase()));
+  let added=0,skipped=0;
+  rows.forEach(r=>{
+    const kw=(r[0]||'').trim(); if(!kw) return;
+    if(existing.has(kw.toLowerCase())){ skipped++; return; }
+    const categoryId=catIdByName((r[1]||'').trim());
+    state.truthTable.push({id:uid(),keyword:kw,categoryId,matchType:'contains'});
+    existing.add(kw.toLowerCase()); added++;
+  });
+  Store.save(); closeModal(); renderTruthTable();
+  const filed=applyRulesToReview();
+  if(filed){ Store.save(); updateBadge(); }
+  toast(`Imported ${added} rule${added===1?'':'s'}${skipped?`, skipped ${skipped} duplicate${skipped===1?'':'s'}`:''}${filed?` · ${filed} review item${filed===1?'':'s'} auto-filed`:''}`,'good');
+}
+
+/* ============================================================
+   7d. CSV PARSING  (handles quoted fields with commas inside)
+   ============================================================ */
+function parseCsvLine(line){
+  const out=[]; let cur='', inq=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(inq){
+      if(ch==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else inq=false; }
+      else cur+=ch;
+    } else {
+      if(ch==='"') inq=true;
+      else if(ch===',') { out.push(cur); cur=''; }
+      else cur+=ch;
+    }
+  }
+  out.push(cur);
+  return out.map(s=>s.trim());
+}
+function parseCsv(text){
+  const lines=text.split(/\r\n|\n|\r/).filter(l=>l.trim().length>0);
+  if(lines.length===0) return [];
+  let rows=lines.map(parseCsvLine);
+  // drop a header row if the first row clearly looks like headers
+  const first=rows[0].map(c=>c.toLowerCase());
+  if(first.includes('date') && first.some(c=>c.includes('desc'))) rows=rows.slice(1);
+  return rows;
+}
+function toNum(s){ if(s==null) return 0; const n=parseFloat(String(s).replace(/[,$]/g,'')); return isNaN(n)?0:n; }
+const FX_RE=/(\d[\d,]*\.?\d*)\s+([A-Z]{3})\s+@\s+(\.?\d+\.?\d*)/;
+function detectForeign(desc){ const m=(desc||'').match(FX_RE); return m?m[0]:''; }
+function importKey(date,desc,spent,credit){ return `${date}|${(desc||'').trim()}|${spent}|${credit}`; }
+
+/* ============================================================
+   7e. IMPORT FLOW
+   step 1: choose files  ->  step 2: assign accounts  ->
+   step 3: preview & edit ->  step 4: confirm
+   ============================================================ */
+let pendingFiles=[];     // {name,text,accountId}
+let previewRows=[];      // parsed rows awaiting confirmation
+
+function renderImportStart(){
+  const area=document.getElementById('importArea');
+  if(state.accounts.length===0){
+    area.innerHTML=`<div class="card"><div class="empty" style="padding:30px">
+      <div class="big">🏦</div><h3>Add an account first</h3>
+      <p>Import needs at least one account to file transactions under.<br>Head to <b>Settings → Accounts</b>.</p>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="switchView('settings')">Go to Settings</button></div></div>`;
+    return;
+  }
+  pendingFiles=[]; previewRows=[];
+  area.innerHTML=`<div class="card">
+    <h2>Step 1 — Choose your CSV files</h2>
+    <div class="sub">You can select more than one at a time. Each file gets assigned to an account in the next step.</div>
+    <button class="btn btn-primary" onclick="document.getElementById('csvFiles').click()">Select CSV files</button>
+    <input type="file" id="csvFiles" accept=".csv" multiple style="display:none" onchange="onCsvChosen(event)">
+    <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)">Expected columns: Date, Description, Spent, Credit, CardNumber (the last is optional). Need the format? <a href="#" onclick="downloadCsvTemplate();return false" style="color:var(--accent)">Download a template</a>.</p>
+  </div>`;
+}
+
+function onCsvChosen(e){
+  const files=[...e.target.files]; e.target.value='';
+  if(files.length===0) return;
+  let loaded=0;
+  pendingFiles=files.map(f=>({name:f.name,text:'',accountId:state.accounts[0].id}));
+  files.forEach((f,idx)=>{
+    const reader=new FileReader();
+    reader.onload=()=>{ pendingFiles[idx].text=reader.result; loaded++; if(loaded===files.length) renderAssignStep(); };
+    reader.readAsText(f);
+  });
+}
+
+function renderAssignStep(){
+  const area=document.getElementById('importArea');
+  const acctOpts=(sel)=>state.accounts.map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)} (${a.currency||'CAD'})</option>`).join('');
+  area.innerHTML=`<div class="card">
+    <h2>Step 2 — Assign each file to an account</h2>
+    <div class="sub">Tell the app which account each statement belongs to.</div>
+    ${pendingFiles.map((pf,i)=>{
+      const rowCount=parseCsv(pf.text).length;
+      return `<div class="acct-item">
+        <div class="meta"><div class="nm">${esc(pf.name)}</div><div class="det">${rowCount} row${rowCount===1?'':'s'} detected</div></div>
+        <select style="max-width:260px" onchange="pendingFiles[${i}].accountId=this.value">${acctOpts(pf.accountId)}</select>
+      </div>`;
+    }).join('')}
+    <div style="margin-top:8px;display:flex;gap:10px">
+      <button class="btn btn-ghost" onclick="renderImportStart()">← Start over</button>
+      <button class="btn btn-primary" onclick="buildPreview()">Parse &amp; preview →</button>
+    </div>
+  </div>`;
+}
+
+function buildPreview(){
+  // existing-transaction key counts, for count-aware duplicate detection
+  const existingCounts={};
+  state.transactions.forEach(t=>{ existingCounts[t.importHash]=(existingCounts[t.importHash]||0)+1; });
+  const seenInBatch={};
+  previewRows=[];
+  pendingFiles.forEach(pf=>{
+    const rows=parseCsv(pf.text);
+    rows.forEach(cols=>{
+      const date=(cols[0]||'').trim();
+      const description=(cols[1]||'').trim();
+      const spent=toNum(cols[2]);
+      const credit=toNum(cols[3]);
+      const cardNumber=(cols[4]||'').trim();
+      if(!date && !description) return; // skip blank lines
+      const key=importKey(date,description,spent,credit);
+      const used=seenInBatch[key]||0;
+      const isDup = used < (existingCounts[key]||0);
+      seenInBatch[key]=used+1;
+
+      const txn={
+        id:uid(), accountId:pf.accountId, date, description,
+        spent, credit, originalCurrencyString:detectForeign(description),
+        cardNumber, categoryId:null, manualCategory:false, adjusted:null, notes:'',
+        flags:{workExpense:false,needsReview:false,isBalancing:false,isInterAccountTransfer:false,eTransferMethod:false},
+        importHash:key
+      };
+      autoProcess(txn);
+      if(!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) txn.flags.needsReview=true;
+      previewRows.push({txn, include:!isDup, isDup, file:pf.name});
+    });
+  });
+  renderPreview();
+}
+
+function flagIcons(f){
+  let s='';
+  if(f.workExpense) s+='🏢';
+  if(f.isInterAccountTransfer) s+='🔁';
+  if(f.isBalancing) s+='⚖️';
+  if(f.eTransferMethod) s+='📱';
+  if(f.needsReview) s+='⚠️';
+  return s||'—';
+}
+
+function renderPreview(){
+  const area=document.getElementById('importArea');
+  const total=previewRows.length;
+  const dups=previewRows.filter(r=>r.isDup).length;
+  const willImport=previewRows.filter(r=>r.include).length;
+  const needReview=previewRows.filter(r=>r.include && r.txn.flags.needsReview).length;
+  area.innerHTML=`<div class="card">
+    <div class="card-head">
+      <div><h2>Step 3 — Review &amp; confirm</h2>
+      <div class="sub">${total} row${total===1?'':'s'} parsed · <b>${willImport}</b> to import · ${dups} possible duplicate${dups===1?'':'s'} · ${needReview} need review</div></div>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-ghost" onclick="renderAssignStep()">← Back</button>
+        <button class="btn btn-primary" onclick="confirmImport()">Confirm import (${willImport})</button>
+      </div>
+    </div>
+    ${dups>0?`<p style="font-size:12.5px;color:var(--warn);margin-bottom:12px">⚠️ Rows that look like duplicates of transactions you already have are <b>unchecked by default</b> and highlighted. Tick them only if you really want to import them again.</p>`:''}
+    <div style="overflow-x:auto">
+    <table><thead><tr>
+      <th style="width:40px"><input type="checkbox" id="selAll" onchange="toggleAllPreview(this.checked)"></th>
+      <th>Date</th><th>Description</th><th>Account</th><th class="tab-nums">Spent</th><th class="tab-nums">Credit</th><th>Original FX</th><th>Category</th><th>Flags</th>
+    </tr></thead><tbody>
+    ${previewRows.map((row,i)=>`<tr style="${row.isDup?'background:rgba(181,83,42,.07)':''}">
+      <td><input type="checkbox" ${row.include?'checked':''} onchange="previewRows[${i}].include=this.checked;refreshPreviewCounts()"></td>
+      <td class="tab-nums" style="white-space:nowrap">${esc(row.txn.date)||'<span style=color:var(--danger)>?</span>'}</td>
+      <td style="max-width:320px">${esc(row.txn.description)}${row.isDup?' <span class="cat-tag excluded">dup</span>':''}</td>
+      <td style="white-space:nowrap">${esc((state.accounts.find(a=>a.id===row.txn.accountId)||{}).name||'')}</td>
+      <td class="tab-nums">${row.txn.spent?money(row.txn.spent):''}</td>
+      <td class="tab-nums" style="color:var(--good)">${row.txn.credit?money(row.txn.credit):''}</td>
+      <td style="font-size:12px;color:var(--ink-soft)">${esc(row.txn.originalCurrencyString||'')}</td>
+      <td><select style="min-width:150px;padding:5px 8px;font-size:13px" onchange="setPreviewCat(${i},this.value)">${categoryOptions(row.txn.categoryId)}</select></td>
+      <td title="🏢 Work · 🔁 Transfer · ⚖️ Balancing · 📱 E-transfer · ⚠️ Review">${flagIcons(row.txn.flags)}</td>
+    </tr>`).join('')}
+    </tbody></table></div>
+  </div>`;
+}
+function setPreviewCat(i,catId){
+  previewRows[i].txn.categoryId=catId||null;
+  previewRows[i].txn.manualCategory=!!catId;
+  // recompute needsReview now that a category may exist
+  const f=previewRows[i].txn.flags;
+  const desc=(previewRows[i].txn.description||'').toLowerCase();
+  const review=desc.includes('service charge')||desc.includes('e-transfer')||desc.includes('preauthorized debit');
+  const excluded=f.isBalancing||f.isInterAccountTransfer;
+  f.needsReview = excluded&&!review ? false : (catId ? false : true);
+  renderPreview();
+}
+function toggleAllPreview(on){ previewRows.forEach(r=>r.include=on); renderPreview(); }
+function refreshPreviewCounts(){
+  const willImport=previewRows.filter(r=>r.include).length;
+  const btn=document.querySelector('#importArea .btn-primary');
+  if(btn) btn.textContent=`Confirm import (${willImport})`;
+}
+function confirmImport(){
+  const chosen=previewRows.filter(r=>r.include);
+  if(chosen.length===0){ toast('Nothing selected to import','bad'); return; }
+  chosen.forEach(r=>{ delete r.txn.manualCategory; state.transactions.push(r.txn); });
+  Store.save(); updateBadge();
+  toast(`Imported ${chosen.length} transaction${chosen.length===1?'':'s'}`,'good');
+  renderImportStart();
+}
+
+/* ============================================================
+   7f. TRANSACTION LEDGER
+   ============================================================ */
+const FLAG_DEFS=[
+  {key:'workExpense', icon:'🏢', label:'Work expense'},
+  {key:'isInterAccountTransfer', icon:'🔁', label:'Transfer'},
+  {key:'isBalancing', icon:'⚖️', label:'Balancing'},
+  {key:'eTransferMethod', icon:'📱', label:'E-transfer'},
+  {key:'needsReview', icon:'⚠️', label:'Needs review'},
+];
+const ledger={ search:'', accountId:'', parent:'', sub:'', flag:'', from:'', to:'',
+  needsReview:false, sortKey:'date', sortDir:'desc', page:1, perPage:50, selected:new Set() };
+
+function acctName(id){ const a=state.accounts.find(x=>x.id===id); return a?a.name:''; }
+
+function ledgerFiltered(){
+  let rows=state.transactions.slice();
+  if(ledger.search){ const q=ledger.search.toLowerCase();
+    rows=rows.filter(t=>(t.description||'').toLowerCase().includes(q)||(t.notes||'').toLowerCase().includes(q)); }
+  if(ledger.accountId) rows=rows.filter(t=>t.accountId===ledger.accountId);
+  if(ledger.parent) rows=rows.filter(t=>catParent(t.categoryId)===ledger.parent);
+  if(ledger.sub) rows=rows.filter(t=>t.categoryId===ledger.sub);
+  if(ledger.needsReview) rows=rows.filter(t=>t.flags&&t.flags.needsReview);
+  if(ledger.flag) rows=rows.filter(t=>t.flags&&t.flags[ledger.flag]);
+  if(ledger.from) rows=rows.filter(t=>(t.date||'')>=ledger.from);
+  if(ledger.to) rows=rows.filter(t=>(t.date||'')<=ledger.to);
+  return rows;
+}
+function ledgerSorted(rows){
+  const dir=ledger.sortDir==='asc'?1:-1, k=ledger.sortKey;
+  const get=t=>{
+    switch(k){
+      case 'date': return t.date||'';
+      case 'account': return acctName(t.accountId).toLowerCase();
+      case 'description': return (t.description||'').toLowerCase();
+      case 'spent': return Number(t.spent)||0;
+      case 'credit': return Number(t.credit)||0;
+      case 'category': return (catName(t.categoryId)||'').toLowerCase();
+      case 'final': return finalAmount(t);
+      default: return t[k];
+    }
+  };
+  return rows.sort((a,b)=>{ const va=get(a),vb=get(b); return va<vb?-1*dir:va>vb?1*dir:0; });
+}
+
+function renderLedger(){
+  renderLedgerFilters();
+  const all=ledgerSorted(ledgerFiltered());
+  const pages=Math.max(1,Math.ceil(all.length/ledger.perPage));
+  if(ledger.page>pages) ledger.page=pages;
+  const start=(ledger.page-1)*ledger.perPage;
+  const rows=all.slice(start,start+ledger.perPage);
+  renderBulkBar();
+
+  const tbl=document.getElementById('ledgerTable');
+  if(state.transactions.length===0){
+    tbl.innerHTML=`<div class="empty"><div class="big">📒</div><h3>No transactions yet</h3>
+      <p>Head to <b>Import</b> to load your first statement.</p>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="switchView('import')">Go to Import</button></div>`;
+    document.getElementById('ledgerPager').innerHTML='';
+    return;
+  }
+  if(all.length===0){
+    tbl.innerHTML=`<div class="empty" style="padding:30px"><div class="big">🔍</div><h3>No matches</h3><p>No transactions fit the current filters.</p></div>`;
+    document.getElementById('ledgerPager').innerHTML='';
+    return;
+  }
+  const arrow=key=>ledger.sortKey===key?`<span class="arr">${ledger.sortDir==='asc'?'▲':'▼'}</span>`:'';
+  const head=`<tr>
+    <th style="width:34px;cursor:default"><input type="checkbox" id="ledSelAll" onclick="event.stopPropagation()" onchange="ledgerSelectPage(this.checked)"></th>
+    <th onclick="ledgerSort('date')">Date ${arrow('date')}</th>
+    <th onclick="ledgerSort('account')">Account ${arrow('account')}</th>
+    <th onclick="ledgerSort('description')">Description ${arrow('description')}</th>
+    <th class="num" onclick="ledgerSort('spent')">Spent ${arrow('spent')}</th>
+    <th class="num" onclick="ledgerSort('credit')">Credit ${arrow('credit')}</th>
+    <th onclick="ledgerSort('category')">Category ${arrow('category')}</th>
+    <th class="num" onclick="ledgerSort('final')">Final ${arrow('final')}</th>
+    <th style="cursor:default">Flags</th>
+  </tr>`;
+  const body=rows.map(t=>{
+    const f=t.flags||{};
+    const excluded=f.isBalancing||f.isInterAccountTransfer;
+    const fx=t.originalCurrencyString?`<div style="font-size:11px;color:var(--ink-soft)">${esc(t.originalCurrencyString)}</div>`:'';
+    const sel=ledger.selected.has(t.id);
+    return `<tr class="${f.needsReview?'review':''} ${excluded?'excluded':''}" onclick="openTxnEditor('${t.id}')">
+      <td class="keep" onclick="event.stopPropagation()"><input type="checkbox" ${sel?'checked':''} onchange="ledgerToggleSel('${t.id}',this.checked)"></td>
+      <td class="num">${esc(t.date)}</td>
+      <td>${esc(acctName(t.accountId))}${t.cardNumber?`<div style="font-size:11px;color:var(--ink-soft)">${esc(t.cardNumber)}</div>`:''}</td>
+      <td style="max-width:300px">${esc(t.description)}${fx}</td>
+      <td class="num">${t.spent?money(t.spent):''}</td>
+      <td class="num" style="color:var(--good)">${t.credit?money(t.credit):''}</td>
+      <td class="keep" onclick="event.stopPropagation()"><select class="inline-cat" onchange="setTxnCategory('${t.id}',this.value)">${categoryOptions(t.categoryId)}</select></td>
+      <td class="num"><b>${money(finalAmount(t))}</b>${(t.adjusted!==null&&t.adjusted!==undefined&&t.adjusted!=='')?'<div style="font-size:11px;color:var(--accent)">adj</div>':''}</td>
+      <td class="keep" onclick="event.stopPropagation()">${FLAG_DEFS.map(fd=>`<span class="flag-toggle ${f[fd.key]?'on':''}" title="${fd.label}" onclick="toggleTxnFlag('${t.id}','${fd.key}')">${fd.icon}</span>`).join('')}</td>
+    </tr>`;
+  }).join('');
+  tbl.innerHTML=`<div class="ledger-table-wrap"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+
+  document.getElementById('ledgerPager').innerHTML = pages>1 ? `<div class="pager">
+    <button class="btn btn-ghost btn-sm" ${ledger.page<=1?'disabled style=opacity:.4':''} onclick="ledgerPage(-1)">← Prev</button>
+    <span>Page ${ledger.page} of ${pages} · ${all.length} transactions</span>
+    <button class="btn btn-ghost btn-sm" ${ledger.page>=pages?'disabled style=opacity:.4':''} onclick="ledgerPage(1)">Next →</button>
+  </div>` : `<div class="pager">${all.length} transaction${all.length===1?'':'s'}</div>`;
+}
+
+function renderLedgerFilters(){
+  const parents=[...new Set(state.categories.map(c=>c.parent))].sort(parentSort);
+  const subs=ledger.parent?state.categories.filter(c=>c.parent===ledger.parent):state.categories;
+  const reviewN=state.transactions.filter(t=>t.flags&&t.flags.needsReview).length;
+  document.getElementById('ledgerFilters').innerHTML=`
+    <div class="fg"><label>Search</label><input value="${esc(ledger.search)}" placeholder="description or notes…" oninput="ledger.search=this.value;ledger.page=1;renderLedger()"></div>
+    <div class="fg"><label>Account</label><select onchange="ledger.accountId=this.value;ledger.page=1;renderLedger()">
+      <option value="">All</option>${state.accounts.map(a=>`<option value="${a.id}" ${ledger.accountId===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Parent category</label><select onchange="ledger.parent=this.value;ledger.sub='';ledger.page=1;renderLedger()">
+      <option value="">All</option>${parents.map(p=>`<option ${ledger.parent===p?'selected':''}>${esc(p)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Subcategory</label><select onchange="ledger.sub=this.value;ledger.page=1;renderLedger()">
+      <option value="">All</option>${subs.sort((a,b)=>a.sortOrder-b.sortOrder).map(c=>`<option value="${c.id}" ${ledger.sub===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
+    <div class="fg"><label>From</label><input type="date" value="${ledger.from}" onchange="ledger.from=this.value;ledger.page=1;renderLedger()"></div>
+    <div class="fg"><label>To</label><input type="date" value="${ledger.to}" onchange="ledger.to=this.value;ledger.page=1;renderLedger()"></div>
+    <div class="fg"><label>&nbsp;</label><span class="chip ${ledger.needsReview?'on':''}" onclick="ledger.needsReview=!ledger.needsReview;ledger.page=1;renderLedger()">⚠️ Needs review${reviewN?` (${reviewN})`:''}</span></div>
+    <div class="fg"><label>&nbsp;</label><button class="btn btn-ghost btn-sm" onclick="clearLedgerFilters()">Clear</button></div>`;
+}
+function clearLedgerFilters(){ Object.assign(ledger,{search:'',accountId:'',parent:'',sub:'',flag:'',from:'',to:'',needsReview:false,page:1}); renderLedger(); }
+function ledgerSort(k){ if(ledger.sortKey===k){ ledger.sortDir=ledger.sortDir==='asc'?'desc':'asc'; } else { ledger.sortKey=k; ledger.sortDir='asc'; } renderLedger(); }
+function ledgerPage(d){ ledger.page+=d; renderLedger(); }
+
+function setTxnCategory(id,catId){
+  const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  t.categoryId=catId||null;
+  if(catId && t.flags) t.flags.needsReview=false;   // assigning a category clears review
+  Store.save(); updateBadge(); renderLedger();
+}
+function toggleTxnFlag(id,key){
+  const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  t.flags=t.flags||{}; t.flags[key]=!t.flags[key];
+  Store.save(); updateBadge(); renderLedger();
+}
+
+/* row editor for the fields that aren't inline */
+function openTxnEditor(id){
+  const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  const f=t.flags||{};
+  setModal('Edit transaction', `
+    <div class="row">
+      <div class="field"><label>Date</label><input id="e_date" type="date" value="${esc(t.date)}"></div>
+      <div class="field"><label>Account</label><select id="e_acct">${state.accounts.map(a=>`<option value="${a.id}" ${a.id===t.accountId?'selected':''}>${esc(a.name)}</option>`).join('')}</select></div>
+    </div>
+    <div class="field"><label>Description</label><input id="e_desc" value="${esc(t.description)}"></div>
+    <div class="row">
+      <div class="field"><label>Spent (original)</label><input id="e_spent" type="number" step="0.01" value="${t.spent||0}"></div>
+      <div class="field"><label>Credit (original)</label><input id="e_credit" type="number" step="0.01" value="${t.credit||0}"></div>
+    </div>
+    <div class="field"><label>Category</label><select id="e_cat">${categoryOptions(t.categoryId)}</select></div>
+    <div class="field"><label>Adjusted amount — overrides the final amount (e.g. your half of a split). Leave blank to use Spent.</label>
+      <input id="e_adj" type="number" step="0.01" placeholder="blank = use ${money(t.spent)}" value="${(t.adjusted!==null&&t.adjusted!==undefined)?t.adjusted:''}"></div>
+    <div class="field"><label>Notes</label><textarea id="e_notes" rows="2">${esc(t.notes||'')}</textarea></div>
+    <label style="margin-bottom:8px">Flags</label>
+    ${FLAG_DEFS.map(fd=>`<div class="checkline"><input type="checkbox" id="e_${fd.key}" ${f[fd.key]?'checked':''}><label for="e_${fd.key}">${fd.icon} ${fd.label}</label></div>`).join('')}
+  `, [
+    {label:'Delete', cls:'btn-danger', fn:()=>{ closeModal(); deleteTxn(id); }},
+    {label:'Cancel', cls:'btn-ghost', fn:closeModal},
+    {label:'Save', cls:'btn-primary', fn:()=>saveTxnEdit(id)}
+  ]);
+}
+function saveTxnEdit(id){
+  const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  t.date=val('e_date'); t.accountId=val('e_acct'); t.description=val('e_desc');
+  t.spent=toNum(val('e_spent')); t.credit=toNum(val('e_credit'));
+  t.categoryId=val('e_cat')||null;
+  const adj=val('e_adj').trim(); t.adjusted = adj===''?null:toNum(adj);
+  t.notes=val('e_notes').trim();
+  t.flags=t.flags||{};
+  FLAG_DEFS.forEach(fd=>{ t.flags[fd.key]=document.getElementById('e_'+fd.key).checked; });
+  t.originalCurrencyString=detectForeign(t.description);
+  Store.save(); updateBadge(); closeModal(); renderLedger(); toast('Transaction updated','good');
+}
+function deleteTxn(id){
+  confirmDialog('Delete transaction','Delete this transaction? This cannot be undone.',()=>{
+    state.transactions=state.transactions.filter(x=>x.id!==id);
+    ledger.selected.delete(id);
+    Store.save(); updateBadge(); renderLedger(); toast('Transaction deleted');
+  });
+}
+
+/* selection + bulk actions */
+function ledgerToggleSel(id,on){ if(on) ledger.selected.add(id); else ledger.selected.delete(id); renderBulkBar(); }
+function ledgerSelectPage(on){
+  const visible=ledgerSorted(ledgerFiltered()).slice((ledger.page-1)*ledger.perPage, (ledger.page-1)*ledger.perPage+ledger.perPage);
+  visible.forEach(t=>{ if(on) ledger.selected.add(t.id); else ledger.selected.delete(t.id); });
+  renderLedger();
+}
+function renderBulkBar(){
+  const bar=document.getElementById('bulkBar');
+  const n=ledger.selected.size;
+  if(n===0){ bar.innerHTML=''; return; }
+  bar.innerHTML=`<div class="bulk-bar">
+    <b>${n} selected</b>
+    <select id="bulkCat" style="width:auto;min-width:160px;padding:6px 10px;font-size:13px">${categoryOptions(null)}</select>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkAssignCat()">Assign category</button>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkWorkExpense()">🏢 Mark work expense</button>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkDelete()">🗑 Delete</button>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="ledger.selected.clear();renderLedger()">Clear selection</button>
+  </div>`;
+}
+function bulkAssignCat(){
+  const catId=document.getElementById('bulkCat').value;
+  if(!catId){ toast('Pick a category first','bad'); return; }
+  state.transactions.forEach(t=>{ if(ledger.selected.has(t.id)){ t.categoryId=catId; if(t.flags) t.flags.needsReview=false; } });
+  Store.save(); updateBadge(); toast(`Assigned to ${ledger.selected.size} transaction(s)`,'good'); ledger.selected.clear(); renderLedger();
+}
+function bulkWorkExpense(){
+  state.transactions.forEach(t=>{ if(ledger.selected.has(t.id)){ t.flags=t.flags||{}; t.flags.workExpense=true; } });
+  Store.save(); toast('Marked as work expense','good'); ledger.selected.clear(); renderLedger();
+}
+function bulkDelete(){
+  const n=ledger.selected.size;
+  confirmDialog('Delete transactions',`Delete ${n} selected transaction${n===1?'':'s'}? This cannot be undone.`,()=>{
+    state.transactions=state.transactions.filter(t=>!ledger.selected.has(t.id));
+    ledger.selected.clear(); Store.save(); updateBadge(); renderLedger(); toast('Deleted');
+  });
+}
+
+/* export transactions as CSV */
+function exportTxnsCsv(){
+  const q=s=>`"${String(s==null?'':s).replace(/"/g,'""')}"`;
+  const head=['Date','Account','CardNumber','Description','Spent','Credit','OriginalCurrency','Category','ParentCategory','Adjusted','FinalAmount','Notes','WorkExpense','NeedsReview','Balancing','Transfer','ETransfer'];
+  const lines=[head.join(',')];
+  state.transactions.forEach(t=>{
+    const f=t.flags||{};
+    lines.push([q(t.date),q(acctName(t.accountId)),q(t.cardNumber),q(t.description),t.spent||0,t.credit||0,
+      q(t.originalCurrencyString),q(catName(t.categoryId)||''),q(catParent(t.categoryId)||''),
+      (t.adjusted==null?'':t.adjusted),finalAmount(t),q(t.notes||''),
+      !!f.workExpense,!!f.needsReview,!!f.isBalancing,!!f.isInterAccountTransfer,!!f.eTransferMethod].join(','));
+  });
+  download(new Blob([lines.join('\n')],{type:'text/csv'}),`ledger-transactions-${todayStr()}.csv`);
+  toast('Transactions exported','good');
+}
+
+/* ============================================================
+   7g. AGGREGATION  (shared by Breakdown + Charts)
+   ============================================================ */
+const PARENT_HEX={
+  'Food & Drink':'#c4622d','Transportation':'#3f6f7a','Health & Wellness':'#5a7d4f','Personal Care':'#a8688f',
+  'Entertainment & Recreation':'#c79a2b','Shopping & Gifts':'#8a5a9e','Travel':'#3d6ca8','Bills':'#6b6457',
+  'Fees':'#94402f','Income':'#3f6f4a','Investments':'#52786e'
+};
+const FALLBACK_HEX=['#9c4322','#3f6f7a','#5a7d4f','#a8688f','#c79a2b','#8a5a9e','#3d6ca8','#6b6457','#b5532a','#52786e'];
+function parentHex(p,i){ return PARENT_HEX[p]||FALLBACK_HEX[(i||0)%FALLBACK_HEX.length]; }
+
+function monthsBetween(from,to){
+  const out=[]; let [fy,fm]=from.split('-').map(Number); const [ty,tm]=to.split('-').map(Number);
+  if(!fy||!ty) return out;
+  while(fy<ty||(fy===ty&&fm<=tm)){ out.push(fy+'-'+String(fm).padStart(2,'0')); fm++; if(fm>12){fm=1;fy++;} if(out.length>600) break; }
+  return out;
+}
+function defaultRange(){
+  const ms=state.transactions.map(t=>(t.date||'').slice(0,7)).filter(m=>/^\d{4}-\d{2}$/.test(m)).sort();
+  const end = ms.length ? ms[ms.length-1] : todayStr().slice(0,7);
+  let [y,m]=end.split('-').map(Number); let sm=m-11, sy=y; while(sm<1){ sm+=12; sy--; }
+  return { from:sy+'-'+String(sm).padStart(2,'0'), to:end };
+}
+/* which accounts feed totals: a chosen one, else all non-USD (we never mix currencies) */
+function viewAccounts(accountId){
+  if(accountId) return [accountId];
+  return state.accounts.filter(a=>(a.currency||'CAD')!=='USD').map(a=>a.id);
+}
+function add(obj,key,m,amt){ obj.byMonth[m]=(obj.byMonth[m]||0)+amt; obj.total+=amt; }
+
+function aggregate(from,to,accountIds){
+  const months=monthsBetween(from,to);
+  const monthSet=new Set(months);
+  const acctSet=new Set(accountIds);
+  const data={ months, spending:{}, income:{}, investment:{},
+    uncategorized:{byMonth:{},total:0,count:0}, excludedTotal:0 };
+  state.transactions.forEach(t=>{
+    if(!acctSet.has(t.accountId)) return;
+    const m=(t.date||'').slice(0,7);
+    if(!monthSet.has(m)) return;
+    const f=t.flags||{};
+    if(f.isBalancing||f.isInterAccountTransfer){ data.excludedTotal+=finalAmount(t); return; }
+    const c=catById(t.categoryId);
+    if(!c){ const amt=finalAmount(t); data.uncategorized.byMonth[m]=(data.uncategorized.byMonth[m]||0)+amt; data.uncategorized.total+=amt; data.uncategorized.count++; return; }
+    let bucket,amt;
+    if(c.isIncome){ bucket=data.income; amt=(t.credit||0)||finalAmount(t); }
+    else if(c.isInvestment){ bucket=data.investment; amt=(t.credit||0)||finalAmount(t); }
+    else if(c.countsTowardSpending){ bucket=data.spending; amt=finalAmount(t); }
+    else return;
+    const p=c.parent;
+    bucket[p]=bucket[p]||{byMonth:{},total:0,subs:{}};
+    add(bucket[p],null,m,amt);
+    bucket[p].subs[c.id]=bucket[p].subs[c.id]||{name:c.name,byMonth:{},total:0};
+    add(bucket[p].subs[c.id],null,m,amt);
+  });
+  return data;
+}
+
+/* ============================================================
+   7h. BREAKDOWN VIEW
+   ============================================================ */
+let bdRange=null, bdAccount='', bdHideZero=false, bdShowExcluded=false;
+
+function renderBreakdown(){
+  if(!bdRange) bdRange=defaultRange();
+  renderBdControls();
+  const el=document.getElementById('bdTable');
+  if(state.transactions.length===0){
+    el.innerHTML=`<div class="empty" style="padding:40px"><div class="big">📊</div><h3>Nothing to break down yet</h3><p>Import some transactions and they'll group by month here.</p></div>`;
+    return;
+  }
+  const data=aggregate(bdRange.from,bdRange.to,viewAccounts(bdAccount));
+  const months=data.months;
+  if(months.length===0){ el.innerHTML=`<div class="empty" style="padding:40px"><h3>Invalid date range</h3><p>Make sure the start month is before the end month.</p></div>`; return; }
+
+  const head=`<tr><th>Category</th><th class="total-col">Total</th>${months.map(m=>`<th>${m}</th>`).join('')}</tr>`;
+  const cell=(byMonth,m)=>{ const v=byMonth[m]||0; return `<td>${v?money(v):'<span style="color:var(--line-strong)">·</span>'}</td>`; };
+
+  function sectionRows(bucket,opts){
+    opts=opts||{};
+    const parents=Object.keys(bucket).sort(parentSort);
+    let html='';
+    parents.forEach((p,i)=>{
+      const pd=bucket[p];
+      html+=`<tr class="bd-parent ${opts.cls||''}">
+        <td><span class="bd-swatch" style="background:${parentHex(p,i)}"></span>${esc(p)}</td>
+        <td class="total-col">${money(pd.total)}</td>
+        ${months.map(m=>`<td>${pd.byMonth[m]?money(pd.byMonth[m]):'·'}</td>`).join('')}</tr>`;
+      const subs=Object.values(pd.subs).sort((a,b)=>b.total-a.total);
+      subs.forEach(s=>{
+        if(bdHideZero && s.total===0) return;
+        html+=`<tr class="bd-sub ${opts.cls||''}"><td>${esc(s.name)}</td>
+          <td class="total-col">${s.total?money(s.total):'·'}</td>
+          ${months.map(m=>cell(s.byMonth,m)).join('')}</tr>`;
+      });
+    });
+    return html;
+  }
+
+  let body=sectionRows(data.spending);
+  // uncategorized
+  if(data.uncategorized.count>0){
+    body+=`<tr class="bd-parent"><td style="color:var(--danger)">⚠️ Uncategorized (${data.uncategorized.count})</td>
+      <td class="total-col">${money(data.uncategorized.total)}</td>
+      ${months.map(m=>`<td>${data.uncategorized.byMonth[m]?money(data.uncategorized.byMonth[m]):'·'}</td>`).join('')}</tr>`;
+  }
+  if(bdShowExcluded){
+    if(Object.keys(data.income).length){ body+=`<tr><td class="bd-section-label" colspan="${months.length+2}">Income (excluded from spending)</td></tr>`+sectionRows(data.income,{cls:'bd-excluded'}); }
+    if(Object.keys(data.investment).length){ body+=`<tr><td class="bd-section-label" colspan="${months.length+2}">Investments (excluded from spending)</td></tr>`+sectionRows(data.investment,{cls:'bd-excluded'}); }
+  }
+  el.innerHTML=`<table class="bd-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+function renderBdControls(){
+  const reviewN=state.transactions.filter(t=>t.flags&&t.flags.needsReview).length;
+  document.getElementById('bdControls').innerHTML=`
+    <div class="fg"><label>From month</label><input type="month" value="${bdRange.from}" onchange="bdRange.from=this.value;renderBreakdown()"></div>
+    <div class="fg"><label>To month</label><input type="month" value="${bdRange.to}" onchange="bdRange.to=this.value;renderBreakdown()"></div>
+    <div class="fg"><label>Account</label><select onchange="bdAccount=this.value;renderBreakdown()">
+      <option value="">All CAD accounts</option>${state.accounts.map(a=>`<option value="${a.id}" ${bdAccount===a.id?'selected':''}>${esc(a.name)} (${a.currency||'CAD'})</option>`).join('')}</select></div>
+    <div class="fg"><label>&nbsp;</label><label class="checkline" style="margin:0"><input type="checkbox" ${bdHideZero?'checked':''} onchange="bdHideZero=this.checked;renderBreakdown()" style="width:auto"> Hide empty rows</label></div>
+    <div class="fg"><label>&nbsp;</label><label class="checkline" style="margin:0"><input type="checkbox" ${bdShowExcluded?'checked':''} onchange="bdShowExcluded=this.checked;renderBreakdown()" style="width:auto"> Show income &amp; investments</label></div>
+    ${reviewN?`<div class="fg"><label>&nbsp;</label><span class="chip on" onclick="clearLedgerFilters();ledger.needsReview=true;switchView('transactions')">⚠️ ${reviewN} uncategorized</span></div>`:''}`;
+}
+
+/* ============================================================
+   7i. CHARTS
+   ============================================================ */
+let chRange=null, chAccount='', chIncludeExtra=false;
+let chartBar=null, chartDonut=null, chartLine=null;
+
+function renderCharts(){
+  if(!chRange) chRange=defaultRange();
+  renderChartControls();
+  const area=document.getElementById('chartsArea');
+  if(typeof Chart==='undefined'){
+    area.innerHTML=`<div class="card"><div class="empty"><div class="big">📈</div><h3>Charts need an internet connection</h3><p>The charting library couldn't load. Connect to the internet and reopen this page.</p></div></div>`;
+    return;
+  }
+  if(state.transactions.length===0){
+    area.innerHTML=`<div class="card"><div class="empty"><div class="big">📈</div><h3>No data to chart yet</h3><p>Import some transactions first.</p></div></div>`;
+    return;
+  }
+  area.innerHTML=`
+    <div class="chart-card"><h2>Spending by category, per month</h2><div class="chart-box"><canvas id="cBar"></canvas></div></div>
+    <div class="chart-card"><h2>Category share</h2><div class="chart-box"><canvas id="cDonut"></canvas></div></div>
+    <div class="chart-card"><h2>Spending trend</h2><div class="chart-box"><canvas id="cLine"></canvas></div></div>`;
+
+  const data=aggregate(chRange.from,chRange.to,viewAccounts(chAccount));
+  const months=data.months;
+  // assemble parent buckets to chart
+  const buckets=Object.assign({}, data.spending);
+  if(chIncludeExtra){ Object.assign(buckets, data.income, data.investment); }
+  const parents=Object.keys(buckets).sort(parentSort);
+
+  [chartBar,chartDonut,chartLine].forEach(c=>{ if(c) c.destroy(); });
+  const font={family:'Hanken Grotesk'};
+
+  chartBar=new Chart(document.getElementById('cBar'),{
+    type:'bar',
+    data:{ labels:months, datasets:parents.map((p,i)=>({label:p,data:months.map(m=>+(buckets[p].byMonth[m]||0).toFixed(2)),backgroundColor:parentHex(p,i)})) },
+    options:{ responsive:true,maintainAspectRatio:false,
+      scales:{x:{stacked:true,ticks:{font}},y:{stacked:true,ticks:{font,callback:v=>'$'+v}}},
+      plugins:{legend:{labels:{font,boxWidth:12}}} }
+  });
+
+  chartDonut=new Chart(document.getElementById('cDonut'),{
+    type:'doughnut',
+    data:{ labels:parents, datasets:[{data:parents.map(p=>+buckets[p].total.toFixed(2)),backgroundColor:parents.map((p,i)=>parentHex(p,i)),borderColor:'#fbf8f1',borderWidth:2}] },
+    options:{ responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'right',labels:{font,boxWidth:12}},
+        tooltip:{callbacks:{label:c=>` ${c.label}: ${money(c.parsed)}`}}} }
+  });
+
+  chartLine=new Chart(document.getElementById('cLine'),{
+    type:'line',
+    data:{ labels:months, datasets:parents.map((p,i)=>({label:p,data:months.map(m=>+(buckets[p].byMonth[m]||0).toFixed(2)),borderColor:parentHex(p,i),backgroundColor:parentHex(p,i),tension:.25,fill:false})) },
+    options:{ responsive:true,maintainAspectRatio:false,
+      scales:{x:{ticks:{font}},y:{ticks:{font,callback:v=>'$'+v}}},
+      plugins:{legend:{labels:{font,boxWidth:12}}} }
+  });
+}
+function renderChartControls(){
+  document.getElementById('chartControls').innerHTML=`
+    <div class="fg"><label>From month</label><input type="month" value="${chRange.from}" onchange="chRange.from=this.value;renderCharts()"></div>
+    <div class="fg"><label>To month</label><input type="month" value="${chRange.to}" onchange="chRange.to=this.value;renderCharts()"></div>
+    <div class="fg"><label>Account</label><select onchange="chAccount=this.value;renderCharts()">
+      <option value="">All CAD accounts</option>${state.accounts.map(a=>`<option value="${a.id}" ${chAccount===a.id?'selected':''}>${esc(a.name)} (${a.currency||'CAD'})</option>`).join('')}</select></div>
+    <div class="fg"><label>&nbsp;</label><label class="checkline" style="margin:0"><input type="checkbox" ${chIncludeExtra?'checked':''} onchange="chIncludeExtra=this.checked;renderCharts()" style="width:auto"> Include income &amp; investments</label></div>`;
+}
+
+/* ============================================================
+   8. SHARED UI HELPERS  (modal, confirm, toast, misc)
+   ============================================================ */
+function setModal(title, bodyHTML, buttons){
+  document.getElementById('modalTitle').textContent=title;
+  document.getElementById('modalBody').innerHTML=bodyHTML;
+  const foot=document.getElementById('modalFoot'); foot.innerHTML='';
+  buttons.forEach(b=>{
+    const el=document.createElement('button');
+    el.className='btn '+b.cls; el.textContent=b.label; el.onclick=b.fn; foot.appendChild(el);
+  });
+  document.getElementById('overlay').classList.add('show');
+}
+function closeModal(){ document.getElementById('overlay').classList.remove('show'); }
+function confirmDialog(title,msg,onYes){
+  setModal(title, `<p style="font-size:15px;line-height:1.6">${msg}</p>`, [
+    {label:'Cancel',cls:'btn-ghost',fn:closeModal},
+    {label:'Yes, continue',cls:'btn-danger',fn:()=>{closeModal();onYes();}}
+  ]);
+}
+function toast(msg,kind){
+  const t=document.createElement('div');
+  t.className='toast'+(kind?' '+kind:'');
+  t.textContent=(kind==='good'?'✓ ':kind==='bad'?'⚠ ':'')+msg;
+  document.getElementById('toasts').appendChild(t);
+  setTimeout(()=>{ t.style.opacity='0'; t.style.transition='.3s'; setTimeout(()=>t.remove(),300); },2600);
+}
+function val(id){ return document.getElementById(id).value; }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function download(blob,filename){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function todayStr(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+
+/* close modal on backdrop click / Escape */
+document.getElementById('overlay').addEventListener('click',e=>{ if(e.target.id==='overlay') closeModal(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+
+/* ============================================================
+   9. LAUNCH
+   ============================================================ */
+Store.load();
+
+// one-time migration: seed the starter truth table the first time
+if(!state.settings) state.settings={};
+if(!Array.isArray(state.truthTable)) state.truthTable=[];
+if(!state.settings.truthSeeded){
+  if(state.truthTable.length===0) state.truthTable=seedTruthTable();
+  state.settings.truthSeeded=true;
+  Store.save(true);
+}
+
+buildNav();
+switchView('dashboard');
+setSync('saved');
+</script>
+</body>
+</html>
