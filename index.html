@@ -285,6 +285,7 @@ tr:last-child td{border-bottom:none}
 .ledger-table-wrap tr.review{background:rgba(168,54,43,.05)}
 .ledger-table-wrap tr.excluded td:not(.keep){opacity:.55}
 .ledger-table-wrap td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ledger-table-wrap td.datecell{max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .inline-cat{padding:4px 6px;font-size:12.5px;min-width:130px;max-width:160px}
 .flag-toggle{cursor:pointer;font-size:14px;padding:1px 2px;border-radius:4px;filter:grayscale(1);opacity:.35;transition:.12s}
 .flag-toggle.on{filter:none;opacity:1}
@@ -430,8 +431,17 @@ tr:last-child td{border-bottom:none}
       </div>
       <input type="file" id="importJsonFile" accept=".json" style="display:none" onchange="importJSON(event)">
       <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)">
-        Your data lives in this browser for now. In Phase 5 we'll sync it to Google Drive so your phone and computer share it.
+        Tip: export a backup before any big cleanup. Restoring a backup replaces everything currently in the app.
       </p>
+      <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
+        <div style="font-size:13px;font-weight:700;color:var(--danger);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Danger zone</div>
+        <div class="sub" style="margin-bottom:12px">These cannot be undone. Each asks you to type a confirmation word.</div>
+        <div class="row">
+          <button class="btn btn-danger" onclick="deleteAllTransactions()">Delete all transactions</button>
+          <button class="btn btn-danger" onclick="wipeAllData()">Erase everything</button>
+        </div>
+        <p style="margin-top:10px;font-size:12px;color:var(--ink-soft)">"Delete all transactions" keeps your accounts, categories, and rules — ideal for re-importing cleanly. "Erase everything" resets the whole app.</p>
+      </div>
     </div>
   </section>
 </main>
@@ -1422,7 +1432,7 @@ function renderLedger(){
   const arrow=key=>ledger.sortKey===key?`<span class="arr">${ledger.sortDir==='asc'?'▲':'▼'}</span>`:'';
   const head=`<tr>
     <th style="width:34px;cursor:default"><input type="checkbox" id="ledSelAll" onclick="event.stopPropagation()" onchange="ledgerSelectPage(this.checked)"></th>
-    <th onclick="ledgerSort('date')">Date ${arrow('date')}</th>
+    <th onclick="ledgerSort('date')" style="width:110px">Date ${arrow('date')}</th>
     <th onclick="ledgerSort('account')">Account ${arrow('account')}</th>
     <th onclick="ledgerSort('description')">Description ${arrow('description')}</th>
     <th class="num" onclick="ledgerSort('spent')">Spent ${arrow('spent')}</th>
@@ -1438,7 +1448,7 @@ function renderLedger(){
     const sel=ledger.selected.has(t.id);
     return `<tr class="${f.needsReview?'review':''} ${excluded?'excluded':''}" onclick="openTxnEditor('${t.id}')">
       <td class="keep" onclick="event.stopPropagation()"><input type="checkbox" ${sel?'checked':''} onchange="ledgerToggleSel('${t.id}',this.checked)"></td>
-      <td class="num">${esc(t.date)}</td>
+      <td class="num datecell" title="${esc(t.date)}">${esc(t.date)}</td>
       <td>${esc(acctName(t.accountId))}${t.cardNumber?`<div style="font-size:11px;color:var(--ink-soft)">${esc(t.cardNumber)}</div>`:''}</td>
       <td style="max-width:300px">${esc(t.description)}${fx}</td>
       <td class="num">${t.spent?money(t.spent):''}</td>
@@ -1450,12 +1460,19 @@ function renderLedger(){
   }).join('');
   tbl.innerHTML=`<div class="ledger-table-wrap"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
 
-  document.getElementById('ledgerPager').innerHTML = pages>1 ? `<div class="pager">
-    <button class="btn btn-ghost btn-sm" ${ledger.page<=1?'disabled style=opacity:.4':''} onclick="ledgerPage(-1)">← Prev</button>
-    <span>Page ${ledger.page} of ${pages} · ${all.length} transactions</span>
-    <button class="btn btn-ghost btn-sm" ${ledger.page>=pages?'disabled style=opacity:.4':''} onclick="ledgerPage(1)">Next →</button>
-  </div>` : `<div class="pager">${all.length} transaction${all.length===1?'':'s'}</div>`;
+  const ppOpts=[25,50,100,200,1000000];
+  const ppLabel=v=>v>=1000000?'All':String(v);
+  const perPageSel=`Rows: <select onchange="ledgerSetPerPage(this.value)" style="width:auto;padding:4px 8px;font-size:13px">
+    ${ppOpts.map(v=>`<option value="${v}" ${ledger.perPage===v?'selected':''}>${ppLabel(v)}</option>`).join('')}</select>`;
+  document.getElementById('ledgerPager').innerHTML = `<div class="pager">
+    <span>${perPageSel}</span>
+    ${pages>1?`<button class="btn btn-ghost btn-sm" ${ledger.page<=1?'disabled style=opacity:.4':''} onclick="ledgerPage(-1)">← Prev</button>
+    <span>Page ${ledger.page} of ${pages}</span>
+    <button class="btn btn-ghost btn-sm" ${ledger.page>=pages?'disabled style=opacity:.4':''} onclick="ledgerPage(1)">Next →</button>`:''}
+    <span style="color:var(--ink-soft)">${all.length} transaction${all.length===1?'':'s'}</span>
+  </div>`;
 }
+function ledgerSetPerPage(v){ ledger.perPage=Number(v); ledger.page=1; renderLedger(); }
 
 function renderLedgerFilters(){
   const parents=[...new Set(state.categories.map(c=>c.parent))].sort(parentSort);
@@ -1792,19 +1809,43 @@ const Sync = { enabled:false, signedIn:false, token:null, tokenExpiry:0, fileId:
   lastModified:null, tokenClient:null, _resolver:null, pendingPush:false };
 
 function initSync(){
-  Sync.enabled = !!GOOGLE_CLIENT_ID && GOOGLE_CLIENT_ID.indexOf('YOUR_CLIENT_ID')===-1;
+  const cid=getClientId();
+  Sync.enabled = !!cid;
+  Sync.clientId = cid;
   updateSyncCard();
   if(!Sync.enabled){ setSync('local'); return; }
   const ready=()=> window.google && google.accounts && google.accounts.oauth2;
   const start=()=>{
     Sync.tokenClient = google.accounts.oauth2.initTokenClient({
-      client_id:GOOGLE_CLIENT_ID, scope:DRIVE_SCOPE,
+      client_id:cid, scope:DRIVE_SCOPE,
       callback:onToken, error_callback:onTokenError
     });
     trySilentSignIn();
   };
   if(ready()) start();
   else { let n=0; const iv=setInterval(()=>{ if(ready()){clearInterval(iv);start();} else if(++n>50){clearInterval(iv);setSync('local');} },150); }
+}
+/* Client ID can live in the app (saved on this device) OR baked into the
+   file. The device copy wins, so re-uploading the file never wipes it. */
+const CLIENT_ID_KEY='ledger_google_client_id';
+function getClientId(){
+  let ls=null; try{ ls=localStorage.getItem(CLIENT_ID_KEY); }catch(e){}
+  if(ls && ls.trim() && ls.indexOf('YOUR_CLIENT_ID')===-1) return ls.trim();
+  if(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_ID.indexOf('YOUR_CLIENT_ID')===-1) return GOOGLE_CLIENT_ID;
+  return null;
+}
+function saveClientId(){
+  const v=(document.getElementById('clientIdInput').value||'').trim();
+  if(!v || v.indexOf('.apps.googleusercontent.com')===-1){ toast('That doesn\u2019t look like a Client ID','bad'); return; }
+  try{ localStorage.setItem(CLIENT_ID_KEY, v); }catch(e){}
+  toast('Client ID saved','good');
+  initSync();
+  setTimeout(driveSignIn, 200);   // open the Google popup right away
+}
+function changeClientId(){
+  try{ localStorage.removeItem(CLIENT_ID_KEY); }catch(e){}
+  Sync.signedIn=false; Sync.token=null; Sync.enabled=false;
+  updateSyncCard();
 }
 function onToken(resp){
   if(resp && resp.access_token){
@@ -1927,17 +1968,22 @@ function showOfflineBanner(show){ const b=document.getElementById('offlineBanner
 function updateSyncCard(){
   const el=document.getElementById('syncCard'); if(!el) return;
   if(!Sync.enabled){
-    el.innerHTML=`<div class="sync-status"><span class="sdot" style="background:var(--ink-soft)"></span>
-      <div style="flex:1"><b>Cloud sync not set up</b><div style="font-size:12.5px;color:var(--ink-soft)">Your data is saved on this device only. Add a Google Client ID in the file to sync across devices.</div></div></div>`;
+    el.innerHTML=`<div class="sync-status" style="flex-direction:column;align-items:stretch;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px"><span class="sdot" style="background:var(--ink-soft)"></span>
+        <div><b>Cloud sync not set up</b><div style="font-size:12.5px;color:var(--ink-soft)">Paste your Google Client ID below to sync this device with Google Drive. It's saved on this device, so app updates won't erase it.</div></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="clientIdInput" placeholder="xxxxx.apps.googleusercontent.com" style="flex:1;min-width:220px">
+        <button class="btn btn-primary btn-sm" onclick="saveClientId()">Save &amp; connect</button>
+      </div></div>`;
     return;
   }
   if(Sync.signedIn){
     el.innerHTML=`<div class="sync-status"><span class="sdot" style="background:var(--good)"></span>
-      <div style="flex:1"><b>Connected to Google Drive</b><div style="font-size:12.5px;color:var(--ink-soft)">Your data syncs automatically across your devices.</div></div>
+      <div style="flex:1"><b>Connected to Google Drive</b><div style="font-size:12.5px;color:var(--ink-soft)">Your data syncs automatically across your devices. <a href="#" onclick="changeClientId();return false" style="color:var(--accent)">Change Client ID</a></div></div>
       <button class="btn btn-ghost btn-sm" onclick="driveSignOut()">Sign out</button></div>`;
   } else {
     el.innerHTML=`<div class="sync-status"><span class="sdot" style="background:var(--warn)"></span>
-      <div style="flex:1"><b>Not signed in</b><div style="font-size:12.5px;color:var(--ink-soft)">Sign in to sync this device with your Google Drive.</div></div>
+      <div style="flex:1"><b>Not signed in</b><div style="font-size:12.5px;color:var(--ink-soft)">Sign in to sync this device with your Google Drive. <a href="#" onclick="changeClientId();return false" style="color:var(--accent)">Change Client ID</a></div></div>
       <button class="btn btn-primary btn-sm" onclick="driveSignIn()">Sign in with Google</button></div>`;
   }
 }
@@ -1975,6 +2021,36 @@ function confirmDialog(title,msg,onYes){
     {label:'Cancel',cls:'btn-ghost',fn:closeModal},
     {label:'Yes, continue',cls:'btn-danger',fn:()=>{closeModal();onYes();}}
   ]);
+}
+/* destructive confirm: the action button only works once the exact phrase is typed */
+function typedConfirm(title, msg, phrase, onYes){
+  setModal(title, `<p style="font-size:15px;line-height:1.6">${msg}</p>
+    <p style="font-size:13.5px;color:var(--ink-soft);margin:14px 0 6px">Type <b style="color:var(--danger)">${phrase}</b> to confirm:</p>
+    <input id="typedConfirmInput" autocomplete="off" placeholder="${phrase}" oninput="document.getElementById('typedConfirmBtn').disabled = this.value!=='${phrase}'">`,
+    [{label:'Cancel',cls:'btn-ghost',fn:closeModal},
+     {label:'Delete',cls:'btn-danger',fn:()=>{ if((document.getElementById('typedConfirmInput').value||'')===phrase){ closeModal(); onYes(); } }}]);
+  const btn=document.getElementById('typedConfirmBtn'); // set after render
+  const b=document.querySelectorAll('#modalFoot .btn-danger')[0];
+  if(b){ b.id='typedConfirmBtn'; b.disabled=true; b.style.opacity='.5'; }
+  // keep opacity in sync with disabled
+  const inp=document.getElementById('typedConfirmInput');
+  if(inp){ inp.addEventListener('input',()=>{ const x=document.getElementById('typedConfirmBtn'); if(x){ x.style.opacity = inp.value===phrase?'1':'.5'; } }); setTimeout(()=>inp.focus(),50); }
+}
+function deleteAllTransactions(){
+  const n=state.transactions.length;
+  if(n===0){ toast('No transactions to delete','bad'); return; }
+  typedConfirm('Delete all transactions',
+    `This permanently deletes all <b>${n}</b> transactions. Your accounts, categories, and truth-table rules are kept. This cannot be undone — make sure you have a backup.`,
+    'DELETE',
+    ()=>{ state.transactions=[]; ledger.selected.clear(); ledger.page=1; Store.save(); updateBadge();
+      if(currentView==='transactions') renderLedger(); else switchView('dashboard'); toast('All transactions deleted','good'); });
+}
+function wipeAllData(){
+  typedConfirm('Erase everything',
+    `This permanently erases <b>everything</b> — accounts, categories, truth-table rules, and all transactions — and resets the app to a fresh state. This cannot be undone. If sync is on, the empty data also replaces your Google Drive copy. Make sure you have a backup first.`,
+    'ERASE',
+    ()=>{ state=freshData(); ensureMigrations(); ledger.selected.clear(); ledger.page=1; openParents={};
+      Store.save(); updateBadge(); buildNav(); switchView('settings'); toast('All data erased','good'); });
 }
 function toast(msg,kind){
   const t=document.createElement('div');
