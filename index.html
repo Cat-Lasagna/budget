@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 /* ============================================================
    DESIGN TOKENS  — colours, fonts, spacing live here so the
@@ -106,7 +107,15 @@ nav::-webkit-scrollbar{display:none}
 .sync .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-soft);transition:.2s}
 .sync.saving .dot{background:var(--accent-soft);animation:pulse 1s infinite}
 .sync.saved .dot{background:var(--good)}
+.sync.synced .dot{background:var(--good)}
+.sync.offline .dot{background:var(--warn)}
 @keyframes pulse{50%{opacity:.3}}
+.offline-banner{display:none;background:#b5532a;color:#fff;font-size:13px;font-weight:500;
+  text-align:center;padding:8px 16px}
+.offline-banner.show{display:block}
+.sync-status{display:flex;align-items:center;gap:10px;padding:14px 16px;border:1px solid var(--line);
+  border-radius:11px;background:var(--paper);margin-bottom:14px}
+.sync-status .sdot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 
 /* ============================================================
    LAYOUT
@@ -320,8 +329,9 @@ tr:last-child td{border-bottom:none}
       <span class="name">Ledger</span>
     </a>
     <nav id="nav"></nav>
-    <div class="sync" id="sync"><span class="dot"></span><span id="syncText">Local</span></div>
+    <div class="sync" id="sync" onclick="switchView('settings')" style="cursor:pointer" title="Sync status — click for settings"><span class="dot"></span><span id="syncText">Local</span></div>
   </div>
+  <div id="offlineBanner" class="offline-banner">⚠️ Working offline — your changes are saved on this device and will sync to Google Drive when you reconnect.</div>
 </header>
 
 <main>
@@ -388,6 +398,11 @@ tr:last-child td{border-bottom:none}
     <div class="page-head"><h1>Settings</h1><p>Manage your accounts, categories, and backups.</p></div>
 
     <div class="card">
+      <div class="card-head"><div><h2>Cloud Sync</h2><div class="sub">Keep your phone and computer in sync through Google Drive.</div></div></div>
+      <div id="syncCard"></div>
+    </div>
+
+    <div class="card">
       <div class="card-head">
         <div><h2>Accounts</h2><div class="sub">The bank accounts and credit cards you track.</div></div>
         <button class="btn btn-primary" onclick="openAccountModal()">+ Add account</button>
@@ -442,6 +457,16 @@ tr:last-child td{border-bottom:none}
    app won't need to change.
    ============================================================ */
 const STORAGE_KEY = 'ledger_budget_data';
+
+/* ============================================================
+   GOOGLE DRIVE SYNC SETUP
+   Paste your Client ID from Google Cloud between the quotes
+   below (it ends in .apps.googleusercontent.com). Until you do,
+   the app works perfectly in local-only mode on this device.
+   ============================================================ */
+const GOOGLE_CLIENT_ID = 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_FILENAME = 'budget_data.json';
 
 /* make a unique ID for accounts, categories, etc. */
 function uid(){
@@ -499,24 +524,28 @@ const Store = {
       catch(e){ toast('Saved data was unreadable — starting fresh','bad'); state=freshData(); }
     } else {
       state = freshData();
-      this.save(true);
+      this.saveLocalOnly();
     }
   },
-  save(silent){
-    setSync('saving');
+  // write to this device's cache only (no cloud)
+  saveLocalOnly(){
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
     catch(e){ /* preview may block; the downloaded file works fine */ }
-    // tiny delay so the "Saving…" state is visible, then flips to Saved
-    clearTimeout(this._t);
-    this._t = setTimeout(()=>setSync('saved'), 250);
+  },
+  // the normal save: cache immediately, then push to Drive if connected
+  save(silent){
+    this.saveLocalOnly();
+    scheduleDrivePush();
   }
 };
 
 /* sync indicator in the top-right */
 function setSync(stateName){
   const el=document.getElementById('sync'), t=document.getElementById('syncText');
+  if(!el) return;
   el.className='sync '+stateName;
-  t.textContent = stateName==='saving' ? 'Saving…' : (stateName==='saved' ? 'Saved ✓' : 'Local');
+  const labels={saving:'Saving…',saved:'Saved ✓',synced:'Synced ✓',offline:'Offline',local:'Local only'};
+  t.textContent = labels[stateName]||'Local only';
 }
 
 /* ============================================================
@@ -577,7 +606,7 @@ function switchView(id){
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.dataset.view===id));
   buildNav();
   if(id==='dashboard') renderDashboard();
-  if(id==='settings'){ renderAccounts(); renderCategories(); }
+  if(id==='settings'){ renderAccounts(); renderCategories(); updateSyncCard(); }
   if(id==='truth') renderTruthTable();
   if(id==='import') renderImportStart();
   if(id==='transactions') renderLedger();
@@ -1665,6 +1694,181 @@ function renderChartControls(){
 }
 
 /* ============================================================
+   7j. GOOGLE DRIVE SYNC
+   Model: Drive's budget_data.json is the source of truth.
+   localStorage is a fast local cache. On launch we show the
+   cache instantly, then pull from Drive. Saves write the cache
+   immediately and push to Drive in the background.
+   ============================================================ */
+const Sync = { enabled:false, signedIn:false, token:null, tokenExpiry:0, fileId:null,
+  lastModified:null, tokenClient:null, _resolver:null, pendingPush:false };
+
+function initSync(){
+  Sync.enabled = !!GOOGLE_CLIENT_ID && GOOGLE_CLIENT_ID.indexOf('YOUR_CLIENT_ID')===-1;
+  updateSyncCard();
+  if(!Sync.enabled){ setSync('local'); return; }
+  const ready=()=> window.google && google.accounts && google.accounts.oauth2;
+  const start=()=>{
+    Sync.tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id:GOOGLE_CLIENT_ID, scope:DRIVE_SCOPE,
+      callback:onToken, error_callback:onTokenError
+    });
+    trySilentSignIn();
+  };
+  if(ready()) start();
+  else { let n=0; const iv=setInterval(()=>{ if(ready()){clearInterval(iv);start();} else if(++n>50){clearInterval(iv);setSync('local');} },150); }
+}
+function onToken(resp){
+  if(resp && resp.access_token){
+    Sync.token=resp.access_token;
+    Sync.tokenExpiry=Date.now()+(Number(resp.expires_in||3600)*1000);
+    Sync.signedIn=true;
+    if(Sync._resolver){ Sync._resolver.resolve(resp); Sync._resolver=null; }
+  } else if(Sync._resolver){ Sync._resolver.reject(resp); Sync._resolver=null; }
+}
+function onTokenError(err){ if(Sync._resolver){ Sync._resolver.reject(err); Sync._resolver=null; } }
+function getToken(interactive){
+  return new Promise((resolve,reject)=>{
+    if(!Sync.tokenClient) return reject('not ready');
+    Sync._resolver={resolve,reject};
+    try{ Sync.tokenClient.requestAccessToken({prompt: interactive?'consent':''}); }
+    catch(e){ Sync._resolver=null; reject(e); }
+  });
+}
+async function ensureFreshToken(){
+  if(!Sync.token || Date.now() > Sync.tokenExpiry-60000){ await getToken(false); }
+}
+async function trySilentSignIn(){
+  try{ await getToken(false); await loadFromDrive(); }
+  catch(e){ Sync.signedIn=false; setSync('local'); updateSyncCard(); }
+}
+async function driveSignIn(){
+  try{ await getToken(true); await loadFromDrive(); toast('Connected to Google Drive','good'); }
+  catch(e){ toast('Sign-in cancelled or blocked','bad'); }
+  updateSyncCard();
+}
+function driveSignOut(){
+  try{ if(Sync.token && google.accounts.oauth2.revoke) google.accounts.oauth2.revoke(Sync.token,()=>{}); }catch(e){}
+  Sync.token=null; Sync.signedIn=false; Sync.fileId=null; Sync.lastModified=null;
+  setSync('local'); updateSyncCard(); toast('Signed out of Google Drive');
+}
+
+async function driveFetch(path,opts){
+  opts=opts||{}; opts.headers=Object.assign({Authorization:'Bearer '+Sync.token},opts.headers||{});
+  const res=await fetch('https://www.googleapis.com'+path,opts);
+  if(res.status===401) throw {auth:true};
+  if(!res.ok) throw new Error('Drive error '+res.status);
+  return res;
+}
+async function findDriveFile(){
+  const q=encodeURIComponent(`name='${DRIVE_FILENAME}' and trashed=false`);
+  const data=await (await driveFetch(`/drive/v3/files?q=${q}&spaces=drive&fields=files(id,modifiedTime)`)).json();
+  return (data.files&&data.files.length)?data.files[0]:null;
+}
+async function createDriveFile(){
+  const meta={name:DRIVE_FILENAME,mimeType:'application/json'};
+  const b='ledgerbnd'+Date.now();
+  const body=`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`+JSON.stringify(meta)+
+    `\r\n--${b}\r\nContent-Type: application/json\r\n\r\n`+JSON.stringify(state)+`\r\n--${b}--`;
+  const data=await (await driveFetch('/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime',
+    {method:'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body})).json();
+  Sync.fileId=data.id; Sync.lastModified=data.modifiedTime;
+}
+async function loadFromDrive(){
+  setSync('saving');
+  try{
+    await ensureFreshToken();
+    const f=await findDriveFile();
+    if(f){
+      Sync.fileId=f.id;
+      const text=await (await driveFetch(`/drive/v3/files/${f.id}?alt=media`)).text();
+      const parsed=JSON.parse(text);
+      if(parsed && Array.isArray(parsed.accounts) && parsed.categories){
+        state=parsed; ensureMigrations(); Store.saveLocalOnly();
+        Sync.lastModified=f.modifiedTime;
+        buildNav(); switchView(currentView); updateBadge();
+      }
+    } else {
+      await createDriveFile();   // first time: upload this device's data
+    }
+    Sync.signedIn=true; Sync.pendingPush=false;
+    setSync('synced'); showOfflineBanner(false); updateSyncCard();
+  }catch(e){
+    if(e&&e.auth){ try{ await getToken(false); return loadFromDrive(); }catch(_){} }
+    setSync('offline'); showOfflineBanner(true); updateSyncCard();
+  }
+}
+
+let pushTimer=null;
+function scheduleDrivePush(){
+  if(!Sync.enabled || !Sync.signedIn){ setSync(Sync.enabled?'saved':'local'); return; }
+  setSync('saving');
+  clearTimeout(pushTimer);
+  pushTimer=setTimeout(doDrivePush,800);
+}
+async function doDrivePush(){
+  try{
+    await ensureFreshToken();
+    if(!Sync.fileId){ const f=await findDriveFile(); if(f){Sync.fileId=f.id;Sync.lastModified=f.modifiedTime;} else { await createDriveFile(); setSync('synced'); return; } }
+    // guard against clobbering newer changes made on another device
+    const meta=await (await driveFetch(`/drive/v3/files/${Sync.fileId}?fields=modifiedTime`)).json();
+    if(Sync.lastModified && meta.modifiedTime && meta.modifiedTime!==Sync.lastModified){
+      const overwrite=await confirmStale();
+      if(!overwrite){ await loadFromDrive(); return; }
+    }
+    const data=await (await driveFetch(`/upload/drive/v3/files/${Sync.fileId}?uploadType=media&fields=modifiedTime`,
+      {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)})).json();
+    Sync.lastModified=data.modifiedTime;
+    Sync.pendingPush=false; setSync('synced'); showOfflineBanner(false);
+  }catch(e){
+    if(e&&e.auth){ try{ await getToken(false); return doDrivePush(); }catch(_){} }
+    Sync.pendingPush=true; setSync('offline'); showOfflineBanner(true);
+  }
+  updateSyncCard();
+}
+function confirmStale(){
+  return new Promise(resolve=>{
+    setModal('Newer changes found on Drive',
+      `<p style="line-height:1.6">This data was changed somewhere else — probably another device — since you opened it here. What would you like to do?</p>`,
+      [{label:'Load the newer version',cls:'btn-ghost',fn:()=>{closeModal();resolve(false);}},
+       {label:'Overwrite with this device',cls:'btn-danger',fn:()=>{closeModal();resolve(true);}}]);
+  });
+}
+function showOfflineBanner(show){ const b=document.getElementById('offlineBanner'); if(b) b.classList.toggle('show',show); }
+
+function updateSyncCard(){
+  const el=document.getElementById('syncCard'); if(!el) return;
+  if(!Sync.enabled){
+    el.innerHTML=`<div class="sync-status"><span class="sdot" style="background:var(--ink-soft)"></span>
+      <div style="flex:1"><b>Cloud sync not set up</b><div style="font-size:12.5px;color:var(--ink-soft)">Your data is saved on this device only. Add a Google Client ID in the file to sync across devices.</div></div></div>`;
+    return;
+  }
+  if(Sync.signedIn){
+    el.innerHTML=`<div class="sync-status"><span class="sdot" style="background:var(--good)"></span>
+      <div style="flex:1"><b>Connected to Google Drive</b><div style="font-size:12.5px;color:var(--ink-soft)">Your data syncs automatically across your devices.</div></div>
+      <button class="btn btn-ghost btn-sm" onclick="driveSignOut()">Sign out</button></div>`;
+  } else {
+    el.innerHTML=`<div class="sync-status"><span class="sdot" style="background:var(--warn)"></span>
+      <div style="flex:1"><b>Not signed in</b><div style="font-size:12.5px;color:var(--ink-soft)">Sign in to sync this device with your Google Drive.</div></div>
+      <button class="btn btn-primary btn-sm" onclick="driveSignIn()">Sign in with Google</button></div>`;
+  }
+}
+
+/* migrations, runnable on launch and after adopting Drive data */
+function ensureMigrations(){
+  if(!state.settings) state.settings={};
+  if(!Array.isArray(state.truthTable)) state.truthTable=[];
+  if(!state.settings.truthSeeded){
+    if(state.truthTable.length===0) state.truthTable=seedTruthTable();
+    state.settings.truthSeeded=true;
+    Store.saveLocalOnly();
+  }
+}
+
+window.addEventListener('online', ()=>{ showOfflineBanner(false); if(Sync.pendingPush) scheduleDrivePush(); });
+window.addEventListener('offline', ()=>{ if(Sync.signedIn){ setSync('offline'); showOfflineBanner(true); } });
+
+/* ============================================================
    8. SHARED UI HELPERS  (modal, confirm, toast, misc)
    ============================================================ */
 function setModal(title, bodyHTML, buttons){
@@ -1707,20 +1911,11 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
 /* ============================================================
    9. LAUNCH
    ============================================================ */
-Store.load();
-
-// one-time migration: seed the starter truth table the first time
-if(!state.settings) state.settings={};
-if(!Array.isArray(state.truthTable)) state.truthTable=[];
-if(!state.settings.truthSeeded){
-  if(state.truthTable.length===0) state.truthTable=seedTruthTable();
-  state.settings.truthSeeded=true;
-  Store.save(true);
-}
-
+Store.load();          // instant render from this device's cache
+ensureMigrations();
 buildNav();
 switchView('dashboard');
-setSync('saved');
+initSync();            // local-only if no Client ID; else silent sign-in + Drive pull
 </script>
 </body>
 </html>
