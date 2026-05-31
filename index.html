@@ -464,7 +464,7 @@ const STORAGE_KEY = 'ledger_budget_data';
    below (it ends in .apps.googleusercontent.com). Until you do,
    the app works perfectly in local-only mode on this device.
    ============================================================ */
-const GOOGLE_CLIENT_ID = '1045855420592-qkd9pkvlcp31i8jt98n2oflecb46lap0.apps.googleusercontent.com';
+const GOOGLE_CLIENT_ID = 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILENAME = 'budget_data.json';
 
@@ -1069,7 +1069,7 @@ function applyTruthImport(rows,replace){
 /* ============================================================
    7d. CSV PARSING  (handles quoted fields with commas inside)
    ============================================================ */
-function parseCsvLine(line){
+function parseLine(line, delim){
   const out=[]; let cur='', inq=false;
   for(let i=0;i<line.length;i++){
     const ch=line[i];
@@ -1078,34 +1078,91 @@ function parseCsvLine(line){
       else cur+=ch;
     } else {
       if(ch==='"') inq=true;
-      else if(ch===',') { out.push(cur); cur=''; }
+      else if(ch===delim){ out.push(cur); cur=''; }
       else cur+=ch;
     }
   }
   out.push(cur);
   return out.map(s=>s.trim());
 }
+/* legacy comma parser, still used by the truth-table CSV import */
 function parseCsv(text){
   const lines=text.split(/\r\n|\n|\r/).filter(l=>l.trim().length>0);
   if(lines.length===0) return [];
-  let rows=lines.map(parseCsvLine);
-  // drop a header row if the first row clearly looks like headers
+  let rows=lines.map(l=>parseLine(l,','));
   const first=rows[0].map(c=>c.toLowerCase());
   if(first.includes('date') && first.some(c=>c.includes('desc'))) rows=rows.slice(1);
   return rows;
 }
-function toNum(s){ if(s==null) return 0; const n=parseFloat(String(s).replace(/[,$]/g,'')); return isNaN(n)?0:n; }
+/* flexible parser for bank statements: auto-detect delimiter */
+function detectDelimiter(text){
+  const sample=text.split(/\r\n|\n|\r/).filter(l=>l.trim()).slice(0,8);
+  const cand=[',','\t',';'];
+  let best=',', bestScore=-1;
+  cand.forEach(d=>{
+    const counts=sample.map(l=>(l.split(d).length-1));
+    const score=counts.reduce((a,b)=>a+b,0);
+    if(score>bestScore){ bestScore=score; best=d; }
+  });
+  return best;
+}
+function parseDelimited(text, delim){
+  return text.split(/\r\n|\n|\r/).filter(l=>l.trim().length>0).map(l=>parseLine(l,delim));
+}
+const DATE_RE=/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/;
+function isDateStr(v){ return DATE_RE.test((v||'').trim()); }
+function isNumStr(v){ const t=(v||'').replace(/[$,\s]/g,''); return t!=='' && !isDateStr(v) && !isNaN(Number(t)); }
+function normDate(v){
+  let s=(v||'').trim().replace(/\//g,'-');
+  const m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if(m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  return s;
+}
+function looksLikeHeader(row){
+  const j=row.join(' ').toLowerCase();
+  if(/\b(date|description|amount|debit|credit|spent|balance|card)\b/.test(j) &&
+     !row.some(isDateStr) && !row.some(isNumStr)) return true;
+  return false;
+}
+/* guess a role for each column: date|desc|amount|spent|credit|card|ignore */
+function guessRoles(rows){
+  const n=Math.max(...rows.map(r=>r.length),0);
+  const sample=rows.slice(0,40);
+  const roles=new Array(n).fill('ignore');
+  const meta=[];
+  for(let i=0;i<n;i++){
+    const vals=sample.map(r=>r[i]||'').filter(v=>v.trim()!=='');
+    const dateF=vals.length?vals.filter(isDateStr).length/vals.length:0;
+    const numF=vals.length?vals.filter(isNumStr).length/vals.length:0;
+    const avgLen=vals.length?vals.reduce((a,b)=>a+b.length,0)/vals.length:0;
+    const masked=vals.some(v=>/[*xX]{2,}/.test(v)||/\d{4}[*xX ]+\d{2,}/.test(v));
+    meta.push({i,empty:vals.length===0,dateF,numF,avgLen,masked});
+  }
+  const dateCols=meta.filter(m=>!m.empty&&m.dateF>0.6).map(m=>m.i);
+  const numCols=meta.filter(m=>!m.empty&&m.numF>0.6&&m.dateF<0.6).map(m=>m.i);
+  const textCols=meta.filter(m=>!m.empty&&m.dateF<=0.6&&m.numF<=0.6).map(m=>m.i);
+  if(dateCols.length) roles[dateCols[0]]='date';
+  // description = longest-average text column; a masked text column becomes card
+  let descCol=-1, descLen=-1;
+  textCols.forEach(i=>{ const m=meta[i]; if(m.masked){ roles[i]='card'; } else if(m.avgLen>descLen){ descLen=m.avgLen; descCol=i; } });
+  if(descCol>=0) roles[descCol]='desc';
+  if(numCols.length>=2){ roles[numCols[0]]='spent'; roles[numCols[1]]='credit'; }
+  else if(numCols.length===1){ roles[numCols[0]]='amount'; }
+  return roles;
+}
+
+function toNum(s){ if(s==null) return 0; const n=parseFloat(String(s).replace(/[,$\s]/g,'')); return isNaN(n)?0:n; }
 const FX_RE=/(\d[\d,]*\.?\d*)\s+([A-Z]{3})\s+@\s+(\.?\d+\.?\d*)/;
 function detectForeign(desc){ const m=(desc||'').match(FX_RE); return m?m[0]:''; }
 function importKey(date,desc,spent,credit){ return `${date}|${(desc||'').trim()}|${spent}|${credit}`; }
 
 /* ============================================================
    7e. IMPORT FLOW
-   step 1: choose files  ->  step 2: assign accounts  ->
-   step 3: preview & edit ->  step 4: confirm
+   step 1: choose files -> step 2: assign account + map columns
+   -> step 3: preview & edit -> step 4: confirm
    ============================================================ */
-let pendingFiles=[];     // {name,text,accountId}
-let previewRows=[];      // parsed rows awaiting confirmation
+let pendingFiles=[];     // {name,text,accountId,delimiter,rows,roles}
+let previewRows=[];
 
 function renderImportStart(){
   const area=document.getElementById('importArea');
@@ -1119,10 +1176,10 @@ function renderImportStart(){
   pendingFiles=[]; previewRows=[];
   area.innerHTML=`<div class="card">
     <h2>Step 1 — Choose your CSV files</h2>
-    <div class="sub">You can select more than one at a time. Each file gets assigned to an account in the next step.</div>
+    <div class="sub">Pick one or more. The app figures out each file's layout automatically and lets you confirm it in the next step.</div>
     <button class="btn btn-primary" onclick="document.getElementById('csvFiles').click()">Select CSV files</button>
-    <input type="file" id="csvFiles" accept=".csv" multiple style="display:none" onchange="onCsvChosen(event)">
-    <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)">Expected columns: Date, Description, Spent, Credit, CardNumber (the last is optional). Need the format? <a href="#" onclick="downloadCsvTemplate();return false" style="color:var(--accent)">Download a template</a>.</p>
+    <input type="file" id="csvFiles" accept=".csv,.tsv,.txt" multiple style="display:none" onchange="onCsvChosen(event)">
+    <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)">Works with commas or tabs, with separate debit/credit columns or one signed amount column. Need a starting point? <a href="#" onclick="downloadCsvTemplate();return false" style="color:var(--accent)">Download a template</a>.</p>
   </div>`;
 }
 
@@ -1130,28 +1187,58 @@ function onCsvChosen(e){
   const files=[...e.target.files]; e.target.value='';
   if(files.length===0) return;
   let loaded=0;
-  pendingFiles=files.map(f=>({name:f.name,text:'',accountId:state.accounts[0].id}));
+  pendingFiles=files.map(f=>({name:f.name,text:'',accountId:state.accounts[0].id,delimiter:',',rows:[],roles:[]}));
   files.forEach((f,idx)=>{
     const reader=new FileReader();
-    reader.onload=()=>{ pendingFiles[idx].text=reader.result; loaded++; if(loaded===files.length) renderAssignStep(); };
+    reader.onload=()=>{
+      const text=reader.result;
+      const delim=detectDelimiter(text);
+      let rows=parseDelimited(text,delim);
+      if(rows.length && looksLikeHeader(rows[0])) rows=rows.slice(1);
+      pendingFiles[idx].text=text;
+      pendingFiles[idx].delimiter=delim;
+      pendingFiles[idx].rows=rows;
+      pendingFiles[idx].roles=guessRoles(rows);
+      loaded++; if(loaded===files.length) renderAssignStep();
+    };
     reader.readAsText(f);
   });
 }
 
+const ROLE_OPTS=[['ignore','Ignore'],['date','Date'],['desc','Description'],['amount','Amount (+/−)'],['spent','Spent'],['credit','Credit'],['card','Card #']];
+function setRole(fileIdx,col,role){
+  const pf=pendingFiles[fileIdx];
+  if(role!=='ignore'){ pf.roles.forEach((r,i)=>{ if(i!==col && r===role) pf.roles[i]='ignore'; }); }
+  pf.roles[col]=role;
+  renderAssignStep();
+}
 function renderAssignStep(){
   const area=document.getElementById('importArea');
   const acctOpts=(sel)=>state.accounts.map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)} (${a.currency||'CAD'})</option>`).join('');
   area.innerHTML=`<div class="card">
-    <h2>Step 2 — Assign each file to an account</h2>
-    <div class="sub">Tell the app which account each statement belongs to.</div>
+    <h2>Step 2 — Confirm each file</h2>
+    <div class="sub">Pick the account, then check the column labels the app guessed. Fix any that look wrong.</div>
     ${pendingFiles.map((pf,i)=>{
-      const rowCount=parseCsv(pf.text).length;
-      return `<div class="acct-item">
-        <div class="meta"><div class="nm">${esc(pf.name)}</div><div class="det">${rowCount} row${rowCount===1?'':'s'} detected</div></div>
-        <select style="max-width:260px" onchange="pendingFiles[${i}].accountId=this.value">${acctOpts(pf.accountId)}</select>
+      const n=Math.max(...pf.rows.map(r=>r.length),0);
+      const samples=pf.rows.slice(0,3);
+      let head='', sampleRows='';
+      for(let c=0;c<n;c++){
+        head+=`<th style="min-width:120px"><select style="width:100%;padding:5px;font-size:12px" onchange="setRole(${i},${c},this.value)">
+          ${ROLE_OPTS.map(([v,l])=>`<option value="${v}" ${pf.roles[c]===v?'selected':''}>${l}</option>`).join('')}
+        </select></th>`;
+      }
+      samples.forEach(r=>{ sampleRows+='<tr>'+Array.from({length:n},(_,c)=>`<td style="font-size:12px;color:var(--ink-soft);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r[c]||'')}</td>`).join('')+'</tr>'; });
+      const warn = pf.roles.indexOf('date')<0 || pf.roles.indexOf('desc')<0 || (pf.roles.indexOf('amount')<0 && pf.roles.indexOf('spent')<0 && pf.roles.indexOf('credit')<0);
+      return `<div style="border:1px solid var(--line);border-radius:11px;padding:14px;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+          <div class="nm">${esc(pf.name)} <span style="font-weight:400;color:var(--ink-soft);font-size:12.5px">· ${pf.rows.length} rows · ${pf.delimiter==='\t'?'tab':pf.delimiter===';'?'semicolon':'comma'}-separated</span></div>
+          <select style="max-width:240px" onchange="pendingFiles[${i}].accountId=this.value">${acctOpts(pf.accountId)}</select>
+        </div>
+        <div style="overflow-x:auto"><table style="min-width:100%"><thead>${head}</thead><tbody>${sampleRows}</tbody></table></div>
+        ${warn?`<p style="font-size:12px;color:var(--warn);margin-top:8px">⚠️ Each file needs a Date, a Description, and either an Amount column or Spent/Credit columns.</p>`:''}
       </div>`;
     }).join('')}
-    <div style="margin-top:8px;display:flex;gap:10px">
+    <div style="display:flex;gap:10px">
       <button class="btn btn-ghost" onclick="renderImportStart()">← Start over</button>
       <button class="btn btn-primary" onclick="buildPreview()">Parse &amp; preview →</button>
     </div>
@@ -1159,25 +1246,26 @@ function renderAssignStep(){
 }
 
 function buildPreview(){
-  // existing-transaction key counts, for count-aware duplicate detection
   const existingCounts={};
   state.transactions.forEach(t=>{ existingCounts[t.importHash]=(existingCounts[t.importHash]||0)+1; });
   const seenInBatch={};
   previewRows=[];
   pendingFiles.forEach(pf=>{
-    const rows=parseCsv(pf.text);
-    rows.forEach(cols=>{
-      const date=(cols[0]||'').trim();
-      const description=(cols[1]||'').trim();
-      const spent=toNum(cols[2]);
-      const credit=toNum(cols[3]);
-      const cardNumber=(cols[4]||'').trim();
-      if(!date && !description) return; // skip blank lines
+    const roles=pf.roles;
+    const di=roles.indexOf('date'), desci=roles.indexOf('desc'),
+          ai=roles.indexOf('amount'), si=roles.indexOf('spent'), ci=roles.indexOf('credit'), cardi=roles.indexOf('card');
+    pf.rows.forEach(cols=>{
+      const date = di>=0 ? normDate(cols[di]||'') : '';
+      const description = desci>=0 ? (cols[desci]||'').trim() : '';
+      let spent=0, credit=0;
+      if(ai>=0){ const a=toNum(cols[ai]); if(a>=0) spent=a; else credit=-a; }   // signed: + = spent, − = credit
+      else { spent = si>=0?toNum(cols[si]):0; credit = ci>=0?toNum(cols[ci]):0; }
+      const cardNumber = cardi>=0 ? (cols[cardi]||'').trim() : '';
+      if(!date && !description) return;
       const key=importKey(date,description,spent,credit);
       const used=seenInBatch[key]||0;
       const isDup = used < (existingCounts[key]||0);
       seenInBatch[key]=used+1;
-
       const txn={
         id:uid(), accountId:pf.accountId, date, description,
         spent, credit, originalCurrencyString:detectForeign(description),
