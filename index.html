@@ -504,7 +504,7 @@ function seedCategories(){
     ['Shopping & Gifts','Clothing & Accessories'],['Shopping & Gifts','Electronics'],['Shopping & Gifts','Gifts'],
     ['Travel','Airfare'],['Travel','Hotels'],['Travel','Car Rentals'],['Travel','Tours & Activities'],['Travel','Travel Other'],
     ['Bills','Phone'],['Bills','Water'],['Bills','Gas (Utility)'],
-    ['Fees','Student Loan'],['Fees','Card Payments'],['Fees','Bank Fees'],['Fees','Cash Withdrawal'],
+    ['Fees','Student Loan'],['Fees','Card Payments',{noCount:true}],['Fees','Bank Fees'],['Fees','Cash Withdrawal'],
     ['Income','Salary',{isIncome:true}],['Income','Student Payment',{isIncome:true}],['Income','Cash Deposit',{isIncome:true}],
     ['Investments','Crypto',{isInvestment:true}],['Investments','Investment Contribution',{isInvestment:true}],
   ];
@@ -512,7 +512,7 @@ function seedCategories(){
     const extra = r[2]||{};
     return {
       id:uid(), parent:r[0], name:r[1],
-      countsTowardSpending: !(extra.isIncome||extra.isInvestment),
+      countsTowardSpending: !(extra.isIncome||extra.isInvestment||extra.noCount),
       isIncome: !!extra.isIncome, isInvestment: !!extra.isInvestment,
       sortOrder:i
     };
@@ -1380,7 +1380,7 @@ function acctName(id){ const a=state.accounts.find(x=>x.id===id); return a?a.nam
 function ledgerFiltered(){
   let rows=state.transactions.slice();
   if(ledger.search){ const q=ledger.search.toLowerCase();
-    rows=rows.filter(t=>(t.description||'').toLowerCase().includes(q)||(t.notes||'').toLowerCase().includes(q)); }
+    rows=rows.filter(t=>(t.description||'').toLowerCase().includes(q)||(t.notes||'').toLowerCase().includes(q)||(t.cardNumber||'').toLowerCase().includes(q)); }
   if(ledger.accountId) rows=rows.filter(t=>t.accountId===ledger.accountId);
   if(ledger.parent) rows=rows.filter(t=>catParent(t.categoryId)===ledger.parent);
   if(ledger.sub) rows=rows.filter(t=>t.categoryId===ledger.sub);
@@ -1566,12 +1566,21 @@ function renderBulkBar(){
   if(n===0){ bar.innerHTML=''; return; }
   bar.innerHTML=`<div class="bulk-bar">
     <b>${n} selected</b>
-    <select id="bulkCat" style="width:auto;min-width:160px;padding:6px 10px;font-size:13px">${categoryOptions(null)}</select>
+    <select id="bulkCat" style="width:auto;min-width:150px;padding:6px 10px;font-size:13px">${categoryOptions(null)}</select>
     <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkAssignCat()">Assign category</button>
-    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkWorkExpense()">🏢 Mark work expense</button>
+    <select id="bulkAcct" style="width:auto;min-width:140px;padding:6px 10px;font-size:13px">${state.accounts.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkMoveAccount()">Move to account</button>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkWorkExpense()">🏢 Work expense</button>
     <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="bulkDelete()">🗑 Delete</button>
-    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="ledger.selected.clear();renderLedger()">Clear selection</button>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--paper);color:var(--paper)" onclick="ledger.selected.clear();renderLedger()">Clear</button>
   </div>`;
+}
+function bulkMoveAccount(){
+  const acctId=document.getElementById('bulkAcct').value;
+  if(!acctId){ toast('Pick an account first','bad'); return; }
+  const n=ledger.selected.size;
+  state.transactions.forEach(t=>{ if(ledger.selected.has(t.id)) t.accountId=acctId; });
+  Store.save(); toast(`Moved ${n} transaction${n===1?'':'s'} to ${acctName(acctId)}`,'good'); ledger.selected.clear(); renderLedger();
 }
 function bulkAssignCat(){
   const catId=document.getElementById('bulkCat').value;
@@ -1735,8 +1744,8 @@ function renderBdControls(){
 /* ============================================================
    7i. CHARTS
    ============================================================ */
-let chRange=null, chAccount='', chIncludeExtra=false;
-let chartBar=null, chartDonut=null, chartLine=null;
+let chRange=null, chAccount='', chIncludeInvest=false;
+let chartBar=null, chartDonut=null, chartLine=null, chartIncome=null;
 
 function renderCharts(){
   if(!chRange) chRange=defaultRange();
@@ -1751,18 +1760,19 @@ function renderCharts(){
     return;
   }
   area.innerHTML=`
-    <div class="chart-card"><h2>Spending by category, per month</h2><div class="chart-box"><canvas id="cBar"></canvas></div></div>
+    <div class="chart-card"><h2>Spending by category, per month${chIncludeInvest?' (incl. investments)':''}</h2><div class="chart-box"><canvas id="cBar"></canvas></div></div>
     <div class="chart-card"><h2>Category share</h2><div class="chart-box"><canvas id="cDonut"></canvas></div></div>
-    <div class="chart-card"><h2>Spending trend</h2><div class="chart-box"><canvas id="cLine"></canvas></div></div>`;
+    <div class="chart-card"><h2>Spending trend</h2><div class="chart-box"><canvas id="cLine"></canvas></div></div>
+    <div class="chart-card"><h2>Income per month</h2><div class="chart-box"><canvas id="cIncome"></canvas></div><p style="font-size:12px;color:var(--ink-soft);margin-top:10px">Shown on its own scale — income is never mixed into the spending charts above.</p></div>`;
 
   const data=aggregate(chRange.from,chRange.to,viewAccounts(chAccount));
   const months=data.months;
-  // assemble parent buckets to chart
+  // spending charts: spending categories, plus investments only if toggled on
   const buckets=Object.assign({}, data.spending);
-  if(chIncludeExtra){ Object.assign(buckets, data.income, data.investment); }
+  if(chIncludeInvest) Object.assign(buckets, data.investment);
   const parents=Object.keys(buckets).sort(parentSort);
 
-  [chartBar,chartDonut,chartLine].forEach(c=>{ if(c) c.destroy(); });
+  [chartBar,chartDonut,chartLine,chartIncome].forEach(c=>{ if(c) c.destroy(); });
   const font={family:'Hanken Grotesk'};
 
   chartBar=new Chart(document.getElementById('cBar'),{
@@ -1788,6 +1798,17 @@ function renderCharts(){
       scales:{x:{ticks:{font}},y:{ticks:{font,callback:v=>'$'+v}}},
       plugins:{legend:{labels:{font,boxWidth:12}}} }
   });
+
+  // always-on income chart (separate scale)
+  const incomeByMonth=months.map(m=>{ let s=0; Object.values(data.income).forEach(p=>{ s+=p.byMonth[m]||0; }); return +s.toFixed(2); });
+  chartIncome=new Chart(document.getElementById('cIncome'),{
+    type:'bar',
+    data:{ labels:months, datasets:[{label:'Income',data:incomeByMonth,backgroundColor:parentHex('Income')}] },
+    options:{ responsive:true,maintainAspectRatio:false,
+      scales:{x:{ticks:{font}},y:{ticks:{font,callback:v=>'$'+v}}},
+      plugins:{legend:{labels:{font,boxWidth:12}},
+        tooltip:{callbacks:{label:c=>` Income: ${money(c.parsed.y)}`}}} }
+  });
 }
 function renderChartControls(){
   document.getElementById('chartControls').innerHTML=`
@@ -1795,7 +1816,7 @@ function renderChartControls(){
     <div class="fg"><label>To month</label><input type="month" value="${chRange.to}" onchange="chRange.to=this.value;renderCharts()"></div>
     <div class="fg"><label>Account</label><select onchange="chAccount=this.value;renderCharts()">
       <option value="">All CAD accounts</option>${state.accounts.map(a=>`<option value="${a.id}" ${chAccount===a.id?'selected':''}>${esc(a.name)} (${a.currency||'CAD'})</option>`).join('')}</select></div>
-    <div class="fg"><label>&nbsp;</label><label class="checkline" style="margin:0"><input type="checkbox" ${chIncludeExtra?'checked':''} onchange="chIncludeExtra=this.checked;renderCharts()" style="width:auto"> Include income &amp; investments</label></div>`;
+    <div class="fg"><label>&nbsp;</label><label class="checkline" style="margin:0"><input type="checkbox" ${chIncludeInvest?'checked':''} onchange="chIncludeInvest=this.checked;renderCharts()" style="width:auto"> Include investments in spending charts</label></div>`;
 }
 
 /* ============================================================
@@ -1995,6 +2016,12 @@ function ensureMigrations(){
   if(!state.settings.truthSeeded){
     if(state.truthTable.length===0) state.truthTable=seedTruthTable();
     state.settings.truthSeeded=true;
+    Store.saveLocalOnly();
+  }
+  // one-time: card payments are transfers, not spending -> stop counting them
+  if(!state.settings.cardPaymentsExcluded){
+    state.categories.forEach(c=>{ if(c.name==='Card Payments'){ c.countsTowardSpending=false; } });
+    state.settings.cardPaymentsExcluded=true;
     Store.saveLocalOnly();
   }
 }
