@@ -1317,6 +1317,163 @@ function detectForeign(desc){ const m=(desc||'').match(FX_RE); return m?m[0]:'';
 function importKey(date,desc,spent,credit){ return `${date}|${(desc||'').trim()}|${spent}|${credit}`; }
 
 /* ============================================================
+   7d-2. PDF STATEMENT PARSING (Triangle / Canadian Tire Bank)
+   Reads the PDF's text layer in the browser via PDF.js, rebuilds
+   the visual lines, and pulls out the transaction rows. Output is
+   fed into the normal import pipeline as Date/Desc/Spent/Credit/Card.
+   ============================================================ */
+const PDFJS_SOURCES=[
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+  'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js'
+];
+const PDFJS_WORKERS=[
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
+  'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js'
+];
+let pdfJsPromise=null;
+function ensurePdfJs(){
+  if(window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if(pdfJsPromise) return pdfJsPromise;
+  pdfJsPromise=new Promise((resolve,reject)=>{
+    let i=0;
+    const tryNext=()=>{
+      if(i>=PDFJS_SOURCES.length){ reject(new Error('PDF reader could not be loaded')); return; }
+      const idx=i++;
+      const s=document.createElement('script');
+      s.src=PDFJS_SOURCES[idx];
+      s.onload=()=>{
+        if(window.pdfjsLib){
+          try{ window.pdfjsLib.GlobalWorkerOptions.workerSrc=PDFJS_WORKERS[idx]; }catch(e){}
+          resolve(window.pdfjsLib);
+        } else tryNext();
+      };
+      s.onerror=tryNext;
+      document.head.appendChild(s);
+    };
+    tryNext();
+  });
+  return pdfJsPromise;
+}
+
+/* rebuild visual text lines from positioned glyph runs.
+   Wide horizontal gaps become multiple spaces, which is what lets the
+   row regex tell a description apart from the amount column. */
+function pdfItemsToLines(items){
+  const byY={};
+  items.forEach(it=>{
+    if(!it.str || !it.str.trim()) return;
+    const x=it.transform[4], y=Math.round(it.transform[5]);
+    (byY[y]=byY[y]||[]).push({x, w:it.width||0, s:it.str});
+  });
+  return Object.keys(byY).map(Number).sort((a,b)=>b-a).map(y=>{
+    const parts=byY[y].sort((a,b)=>a.x-b.x);
+    let out='', prevEnd=null;
+    parts.forEach(p=>{
+      if(prevEnd!==null){
+        const gap=p.x-prevEnd;
+        if(gap>6) out+='   '; else if(gap>0.8) out+=' ';
+      }
+      out+=p.s; prevEnd=p.x+(p.w||0);
+    });
+    return out;
+  });
+}
+async function extractPdfLines(file){
+  const lib=await ensurePdfJs();
+  const buf=await file.arrayBuffer();
+  const pdf=await lib.getDocument({data:buf}).promise;
+  let lines=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const tc=await page.getTextContent();
+    lines=lines.concat(pdfItemsToLines(tc.items));
+  }
+  return lines;
+}
+
+const PDF_MONTHS={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+const PDF_MONTHS_FULL={january:1,february:2,march:3,april:4,may:5,june:6,july:7,
+  august:8,september:9,october:10,november:11,december:12};
+const PDF_TXN_RE=/^\s*([A-Z][a-z]{2})\s+(\d{1,2})\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(.+?)\s{2,}(-?\$?[\d,]+\.\d{2})(?!\d)/;
+
+/* statements print "Jun 24" with no year; derive it from the period line
+   so December rows on a January statement get the previous year */
+function pdfYearMap(text){
+  const map={};
+  let m=text.match(/For the period:\s*([A-Za-z]+)\s+\d{1,2},\s*(\d{4})\s*to\s*([A-Za-z]+)\s+\d{1,2},\s*(\d{4})/i);
+  let sM,sY,eM,eY;
+  if(m){ sM=PDF_MONTHS_FULL[m[1].toLowerCase()]; sY=+m[2]; eM=PDF_MONTHS_FULL[m[3].toLowerCase()]; eY=+m[4]; }
+  else{
+    const s=text.match(/Statement date:?\s*([A-Za-z]+)\s+\d{1,2},\s*(\d{4})/i);
+    if(!s) return map;
+    eM=PDF_MONTHS_FULL[s[1].toLowerCase()]; eY=+s[2];
+    sM=eM===1?12:eM-1; sY=eM===1?eY-1:eY;
+  }
+  if(sM) map[sM]=sY;
+  if(eM) map[eM]=eY;
+  const prev=sM===1?12:sM-1;
+  if(prev && !map[prev]) map[prev]=sM===1?sY-1:sY;
+  return map;
+}
+function pdfMoney(s){ return parseFloat(String(s).replace(/[$,]/g,''))||0; }
+
+/* returns {rows, card, count, checks[]} — rows are [date,desc,spent,credit,card] */
+function parseStatementPdf(lines){
+  const text=lines.join('\n');
+  const ymap=pdfYearMap(text);
+  const years=Object.values(ymap);
+  let card='';
+  const acct=text.match(/Account number:\s*(\d{4}[\s\dXx]{6,})/);
+  if(acct) card=acct[1].trim().replace(/\s+/g,' ');
+  let current=card;
+  const rows=[], seen=new Set();
+  let interest=0;
+
+  lines.forEach(line=>{
+    const c=line.match(/Card\s*#\s*(\d{4}[\s\dXx]{6,})/);
+    if(c) current=c[1].trim().replace(/\s+/g,' ');
+    const mi=line.match(/Total interest charges\s+\$?(-?[\d,]+\.\d{2})/);
+    if(mi) interest=pdfMoney(mi[1]);
+    const t=line.match(PDF_TXN_RE);
+    if(!t) return;
+    const mo=PDF_MONTHS[t[1].toLowerCase()];
+    if(!mo) return;
+    const yr=ymap[mo]||(years.length?Math.max.apply(null,years):new Date().getFullYear());
+    const date=`${yr}-${String(mo).padStart(2,'0')}-${String(+t[2]).padStart(2,'0')}`;
+    const desc=t[5].replace(/\s+/g,' ').trim();
+    const val=pdfMoney(t[6]);
+    // negative on a statement means money came back to you
+    const spent=val>0?val.toFixed(2):'';
+    const credit=val<0?Math.abs(val).toFixed(2):'';
+    const key=date+'|'+desc+'|'+spent+'|'+credit;
+    if(seen.has(key)) return;
+    seen.add(key);
+    rows.push([date,desc,spent,credit,current]);
+  });
+
+  // interest only matters when it actually cost something
+  if(interest>0){
+    const s=text.match(/Statement date:?\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/i);
+    let d='';
+    if(s){ const mo=PDF_MONTHS_FULL[s[1].toLowerCase()];
+      if(mo) d=`${s[3]}-${String(mo).padStart(2,'0')}-${String(+s[2]).padStart(2,'0')}`; }
+    rows.push([d||rows.length&&rows[rows.length-1][0]||'', 'INTEREST CHARGES', interest.toFixed(2), '', card]);
+  }
+
+  // cross-check against the totals the statement prints for itself
+  const checks=[];
+  const sp=rows.reduce((a,r)=>a+(parseFloat(r[2])||0),0)-interest;
+  const cr=rows.reduce((a,r)=>a+(parseFloat(r[3])||0),0);
+  const mp=text.match(/Total purchases\s+\$?([\d,]+\.\d{2})/);
+  if(mp){ const want=pdfMoney(mp[1]);
+    checks.push({ok:Math.abs(want-sp)<0.01, label:'Purchases', want, got:sp}); }
+  const mc=text.match(/Total payments received\s+-?\$?([\d,]+\.\d{2})/);
+  if(mc){ const want=pdfMoney(mc[1]);
+    checks.push({ok:Math.abs(want-cr)<0.01, label:'Payments', want, got:cr}); }
+  return {rows, card, interest, checks};
+}
+
+/* ============================================================
    7e. IMPORT FLOW
    step 1: choose files -> step 2: assign account + map columns
    -> step 3: preview & edit -> step 4: confirm
@@ -1337,20 +1494,57 @@ function renderImportStart(){
   }
   pendingFiles=[]; previewRows=[];
   area.innerHTML=`<div class="card">
-    <h2>Step 1 — Choose your CSV files</h2>
-    <div class="sub">Pick one or more. The app figures out each file's layout automatically and lets you confirm it in the next step.</div>
-    <button class="btn btn-primary" onclick="document.getElementById('csvFiles').click()">Select CSV files</button>
-    <input type="file" id="csvFiles" accept=".csv,.tsv,.txt" multiple style="display:none" onchange="onCsvChosen(event)">
-    <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)">Works with commas or tabs, with separate debit/credit columns or one signed amount column. Need a starting point? <a href="#" onclick="downloadCsvTemplate();return false" style="color:var(--accent)">Download a template</a>.</p>
+    <h2>Step 1 — Choose your statements</h2>
+    <div class="sub">Pick one or more PDF statements or CSV exports. The app works out each file's layout and lets you confirm it in the next step.</div>
+    <button class="btn btn-primary" onclick="document.getElementById('csvFiles').click()">Select PDF or CSV files</button>
+    <input type="file" id="csvFiles" accept=".pdf,.csv,.tsv,.txt" multiple style="display:none" onchange="onCsvChosen(event)">
+    <p style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)"><b>PDF statements</b> are read directly — no conversion needed (built for Triangle / Canadian Tire Bank statements; needs an internet connection the first time).<br>
+    <b>CSV files</b> work with commas or tabs, with separate debit/credit columns or one signed amount column. <a href="#" onclick="downloadCsvTemplate();return false" style="color:var(--accent)">Download a template</a>.</p>
   </div>`;
 }
 
 function onCsvChosen(e){
   const files=[...e.target.files]; e.target.value='';
   if(files.length===0) return;
-  let loaded=0;
   pendingFiles=files.map(f=>({name:f.name,text:'',accountId:state.accounts[0].id,delimiter:',',rows:[],roles:[]}));
+  const isPdf=f=>/\.pdf$/i.test(f.name)||f.type==='application/pdf';
+  if(files.some(isPdf)){
+    document.getElementById('importArea').innerHTML=
+      `<div class="card"><div class="empty" style="padding:34px"><div class="big">📄</div>
+      <h3>Reading your statement…</h3><p>Pulling the transactions out of the PDF. This takes a few seconds.</p></div></div>`;
+  }
+  let loaded=0;
+  const done=()=>{ if(++loaded===files.length) renderAssignStep(); };
+
   files.forEach((f,idx)=>{
+    if(isPdf(f)){
+      extractPdfLines(f).then(lines=>{
+        const res=parseStatementPdf(lines);
+        const pf=pendingFiles[idx];
+        pf.isPdf=true;
+        pf.rows=res.rows;
+        pf.roles=['date','desc','spent','credit','card'];
+        pf.dateFormat='ymd';
+        pf.flipSigns=false;
+        pf.delimiter=',';
+        pf.pdfChecks=res.checks;
+        pf.pdfInterest=res.interest;
+        if(!res.rows.length) pf.pdfError='No transactions found in this PDF. It may be a scanned image, or a statement layout the reader does not recognize.';
+        // match this PDF to an account by its card number, if we can
+        if(res.card){
+          const digits=res.card.replace(/\D/g,'').slice(-4);
+          const hit=state.accounts.find(a=>(a.cardNumbers||[]).some(c=>c.replace(/\D/g,'').slice(-4)===digits));
+          if(hit) pf.accountId=hit.id;
+        }
+        done();
+      }).catch(err=>{
+        const pf=pendingFiles[idx];
+        pf.isPdf=true; pf.rows=[]; pf.roles=[];
+        pf.pdfError=(err&&err.message)||'Could not read this PDF.';
+        done();
+      });
+      return;
+    }
     const reader=new FileReader();
     reader.onload=()=>{
       const text=reader.result;
@@ -1364,15 +1558,17 @@ function onCsvChosen(e){
       pendingFiles[idx].flipSigns=false;
       const dc=pendingFiles[idx].roles.indexOf('date');
       pendingFiles[idx].dateFormat = dc>=0 ? detectDateFormat(rows,dc) : 'ymd';
-      applySavedMapping(idx);   // reuse this account's remembered layout if it fits
-      loaded++; if(loaded===files.length) renderAssignStep();
+      applySavedMapping(idx);
+      done();
     };
+    reader.onerror=()=>{ pendingFiles[idx].pdfError='Could not read this file.'; done(); };
     reader.readAsText(f);
   });
 }
 /* remembered per-account layouts: applied when column count matches */
 function applySavedMapping(i){
   const pf=pendingFiles[i];
+  if(pf.isPdf){ pf.savedMapping=false; return; }
   const maps=(state.settings&&state.settings.importMappings)||{};
   const m=maps[pf.accountId];
   const cols=Math.max(...pf.rows.map(r=>r.length),0);
@@ -1403,7 +1599,7 @@ function renderAssignStep(){
   const acctOpts=(sel)=>state.accounts.map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)} (${a.currency||'CAD'})</option>`).join('');
   area.innerHTML=`<div class="card">
     <h2>Step 2 — Confirm each file</h2>
-    <div class="sub">Pick the account, then check the column labels the app guessed. Fix any that look wrong.</div>
+    <div class="sub">Pick the account for each file. For CSVs, check the column labels the app guessed and fix any that look wrong.</div>
     ${pendingFiles.map((pf,i)=>{
       const n=Math.max(...pf.rows.map(r=>r.length),0);
       const samples=pf.rows.slice(0,3);
@@ -1416,6 +1612,24 @@ function renderAssignStep(){
       samples.forEach(r=>{ sampleRows+='<tr>'+Array.from({length:n},(_,c)=>`<td style="font-size:12px;color:var(--ink-soft);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r[c]||'')}</td>`).join('')+'</tr>'; });
       const warn = pf.roles.indexOf('date')<0 || pf.roles.indexOf('desc')<0 || (pf.roles.indexOf('amount')<0 && pf.roles.indexOf('spent')<0 && pf.roles.indexOf('credit')<0);
       const hasAmount=pf.roles.indexOf('amount')>=0;
+      if(pf.isPdf){
+        const checks=pf.pdfChecks||[];
+        const allOk=checks.length&&checks.every(c=>c.ok);
+        return `<div style="border:1px solid var(--line);border-radius:11px;padding:14px;margin-bottom:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+            <div class="nm">📄 ${esc(pf.name)} <span style="font-weight:400;color:var(--ink-soft);font-size:12.5px">· ${pf.rows.length} transaction${pf.rows.length===1?'':'s'} read from PDF</span></div>
+            <select style="max-width:240px" aria-label="Account for this file" onchange="importAcctChanged(${i},this.value)">${acctOpts(pf.accountId)}</select>
+          </div>
+          ${pf.pdfError?`<p style="font-size:12.5px;color:var(--danger)">⚠️ ${esc(pf.pdfError)}</p>`:''}
+          ${checks.length?`<p style="font-size:12.5px;color:${allOk?'var(--good)':'var(--warn)'}">
+            ${allOk?'✓ Totals match the statement':'⚠️ Totals do not match the statement — check before importing'}
+            <span style="color:var(--ink-soft)"> · ${checks.map(c=>`${c.label}: ${money(c.got)} vs ${money(c.want)} stated`).join(' · ')}</span></p>`:''}
+          ${pf.pdfInterest>0?`<p style="font-size:12.5px;color:var(--ink-soft)">Interest of ${money(pf.pdfInterest)} was charged, so it's included as a transaction.</p>`:''}
+          ${pf.rows.length?`<div style="overflow-x:auto;margin-top:8px"><table style="min-width:100%"><tbody>
+            ${pf.rows.slice(0,3).map(r=>`<tr>${r.map(v=>`<td style="font-size:12px;color:var(--ink-soft);white-space:nowrap">${esc(v)}</td>`).join('')}</tr>`).join('')}
+          </tbody></table>${pf.rows.length>3?`<div style="font-size:12px;color:var(--ink-soft);margin-top:4px">…and ${pf.rows.length-3} more</div>`:''}</div>`:''}
+        </div>`;
+      }
       return `<div style="border:1px solid var(--line);border-radius:11px;padding:14px;margin-bottom:14px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
           <div class="nm">${esc(pf.name)} <span style="font-weight:400;color:var(--ink-soft);font-size:12.5px">· ${pf.rows.length} rows · ${pf.delimiter==='\t'?'tab':pf.delimiter===';'?'semicolon':'comma'}-separated${pf.savedMapping?' · <b style=color:var(--good)>saved layout</b>':''}</span></div>
@@ -1555,6 +1769,7 @@ function confirmImport(){
   // remember each file's layout for its account, so next month is one click
   state.settings.importMappings=state.settings.importMappings||{};
   pendingFiles.forEach(pf=>{
+    if(pf.isPdf) return;   // PDFs have a fixed layout; nothing to remember
     state.settings.importMappings[pf.accountId]={
       cols:Math.max(...pf.rows.map(r=>r.length),0),
       roles:pf.roles.slice(), dateFormat:pf.dateFormat, flipSigns:!!pf.flipSigns
