@@ -369,6 +369,9 @@ tr:last-child td{border-bottom:none}
 .chart-card{background:var(--paper-2);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:20px}
 .chart-card h2{font-family:var(--serif);font-size:20px;font-weight:600;margin-bottom:16px}
 .chart-box{position:relative;height:340px}
+.notice-bar{margin-top:14px;padding:11px 14px;border-radius:10px;font-size:13.5px;
+  background:rgba(156,67,34,.08);border:1px solid var(--accent-soft);color:var(--ink);
+  display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -407,7 +410,7 @@ tr:last-child td{border-bottom:none}
   <!-- BREAKDOWN -->
   <section class="panel" data-view="breakdown">
     <div class="page-head"><h1>Breakdown</h1><p>Month-by-month spending, by category — your spreadsheet, kept current.</p></div>
-    <div class="card"><div class="bd-controls" id="bdControls"></div></div>
+    <div class="card"><div class="bd-controls" id="bdControls"></div><div id="bdNotice"></div></div>
     <div class="card" style="padding:0;overflow:hidden"><div id="bdTable" class="bd-wrap"></div></div>
   </section>
 
@@ -486,7 +489,7 @@ tr:last-child td{border-bottom:none}
       <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
         <div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;color:var(--ink-soft)">Preferences</div>
         <label class="checkline" style="margin:0"><input type="checkbox" id="netCreditsChk" style="width:auto" onchange="toggleNetCredits(this.checked)">
-          <span>Net refunds against spending categories<br><span style="font-size:12px;color:var(--ink-soft);font-weight:400">A refund in, say, Restaurant reduces that category's total in the breakdown and charts. Rows you've manually adjusted are left alone.</span></span></label>
+          <span>Subtract refunds from their category<br><span style="font-size:12px;color:var(--ink-soft);font-weight:400">On by default. A $100 refund on a $300 charge means that category shows $200. Transactions where you typed an Adjusted amount keep your number instead.</span></span></label>
         <div id="dataSizeInfo" style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)"></div>
       </div>
       <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
@@ -576,7 +579,8 @@ function seedCategories(){
 }
 
 function freshData(){
-  return { version:1, accounts:[], transactions:[], categories:seedCategories(), truthTable:[], settings:{} };
+  return { version:1, accounts:[], transactions:[], categories:seedCategories(), truthTable:[],
+           settings:{ netCredits:true } };
 }
 
 let state = freshData();
@@ -944,6 +948,11 @@ function renderPrefs(){
     el.innerHTML=`Data size: <b>${mb>=1?mb.toFixed(2)+' MB':kb+' KB'}</b> of roughly 5 MB local capacity (${pct}%) · ${state.transactions.length} transactions`+
       (pct>=80?` <span style="color:var(--warn)">— getting large; consider exporting older years and trimming</span>`:'');
   }
+}
+function enableNetCredits(){
+  state.settings.netCredits=true; Store.save();
+  renderBreakdown();
+  toast('Refunds now reduce category totals','good');
 }
 function toggleNetCredits(on){
   state.settings.netCredits=!!on;
@@ -1804,7 +1813,8 @@ function ledgerFiltered(){
   if(ledger.parent) rows=rows.filter(t=>catParent(t.categoryId)===ledger.parent);
   if(ledger.sub) rows=rows.filter(t=>t.categoryId===ledger.sub);
   if(ledger.needsReview) rows=rows.filter(t=>t.flags&&t.flags.needsReview);
-  if(ledger.flag) rows=rows.filter(t=>t.flags&&t.flags[ledger.flag]);
+  if(ledger.flag==='__credit__') rows=rows.filter(t=>Number(t.credit)>0);
+  else if(ledger.flag) rows=rows.filter(t=>t.flags&&t.flags[ledger.flag]);
   if(ledger.from) rows=rows.filter(t=>(t.date||'')>=ledger.from);
   if(ledger.to) rows=rows.filter(t=>(t.date||'')<=ledger.to);
   return rows;
@@ -1931,7 +1941,9 @@ function renderLedgerFilters(){
     <div class="fg"><label>From</label><input type="date" value="${ledger.from}" onchange="ledger.from=this.value;ledger.page=1;renderLedger()"></div>
     <div class="fg"><label>To</label><input type="date" value="${ledger.to}" onchange="ledger.to=this.value;ledger.page=1;renderLedger()"></div>
     <div class="fg"><label>Flag</label><select aria-label="Filter by flag" onchange="ledger.flag=this.value;ledger.page=1;renderLedger()">
-      <option value="">All</option>${FLAG_DEFS.filter(f=>f.key!=='needsReview').map(f=>`<option value="${f.key}" ${ledger.flag===f.key?'selected':''}>${f.icon} ${f.label}</option>`).join('')}</select></div>
+      <option value="">All</option>
+      <option value="__credit__" ${ledger.flag==='__credit__'?'selected':''}>💵 Has refund / credit</option>
+      ${FLAG_DEFS.filter(f=>f.key!=='needsReview').map(f=>`<option value="${f.key}" ${ledger.flag===f.key?'selected':''}>${f.icon} ${f.label}</option>`).join('')}</select></div>
     <div class="fg"><label>&nbsp;</label><span class="chip ${ledger.needsReview?'on':''}" role="button" tabindex="0" onclick="ledger.needsReview=!ledger.needsReview;ledger.page=1;renderLedger()">⚠️ Needs review${reviewN?` (${reviewN})`:''}</span></div>
     <div class="fg"><label>&nbsp;</label><button class="btn btn-ghost btn-sm" onclick="clearLedgerFilters()">Clear</button></div>`;
 }
@@ -2108,6 +2120,33 @@ function viewAccounts(accountId){
 }
 function add(obj,key,m,amt){ obj.byMonth[m]=(obj.byMonth[m]||0)+amt; obj.total+=amt; }
 
+/* a credit reduces its category's total only when the user hasn't taken
+   manual control of the row (adjusted), and it isn't work/lent money */
+function creditOffset(t){
+  if(!(state.settings && state.settings.netCredits)) return 0;
+  const f=t.flags||{};
+  if(f.workExpense || f.lentOut) return 0;
+  if(t.adjusted!==null && t.adjusted!==undefined && t.adjusted!=='') return 0;
+  return Number(t.credit)||0;
+}
+/* refunds sitting in spending categories that are NOT reducing any total */
+function unnettedCredits(from,to,accountIds){
+  if(state.settings && state.settings.netCredits) return {count:0,total:0};
+  const months=new Set(monthsBetween(from,to)), acct=new Set(accountIds);
+  let count=0,total=0;
+  state.transactions.forEach(t=>{
+    if(!acct.has(t.accountId)) return;
+    if(!months.has((t.date||'').slice(0,7))) return;
+    const f=t.flags||{};
+    if(f.isBalancing||f.isInterAccountTransfer||f.workExpense||f.lentOut) return;
+    if(!(Number(t.credit)>0)) return;
+    const c=catById(t.categoryId);
+    if(c && (c.isIncome||c.isInvestment||!c.countsTowardSpending)) return;
+    if(t.adjusted!==null && t.adjusted!==undefined && t.adjusted!=='') return;
+    count++; total+=Number(t.credit)||0;
+  });
+  return {count,total};
+}
 function aggregate(from,to,accountIds){
   const months=monthsBetween(from,to);
   const monthSet=new Set(months);
@@ -2121,18 +2160,12 @@ function aggregate(from,to,accountIds){
     const f=t.flags||{};
     if(f.isBalancing||f.isInterAccountTransfer){ data.excludedTotal+=finalAmount(t); return; }
     const c=catById(t.categoryId);
-    if(!c){ const amt=finalAmount(t); data.uncategorized.byMonth[m]=(data.uncategorized.byMonth[m]||0)+amt; data.uncategorized.total+=amt; data.uncategorized.count++; return; }
+    if(!c){ const amt=finalAmount(t)-creditOffset(t); data.uncategorized.byMonth[m]=(data.uncategorized.byMonth[m]||0)+amt; data.uncategorized.total+=amt; data.uncategorized.count++; return; }
     let bucket,amt;
     if(c.isIncome){ bucket=data.income; amt=(t.credit||0)||finalAmount(t); }
     else if(c.isInvestment){ bucket=data.investment; amt=(t.credit||0)||finalAmount(t); }
     else if(c.countsTowardSpending){
-      bucket=data.spending; amt=finalAmount(t);
-      // opt-in: refunds/credits reduce their category's total, unless the user
-      // took manual control (adjusted) or the row is a work expense
-      if(state.settings && state.settings.netCredits && !f.workExpense &&
-         (t.adjusted===null||t.adjusted===undefined||t.adjusted==='')){
-        amt-=Number(t.credit)||0;
-      }
+      bucket=data.spending; amt=finalAmount(t)-creditOffset(t);
     }
     else return;
     const p=c.parent;
@@ -2160,6 +2193,16 @@ function renderBreakdown(){
   const data=aggregate(bdRange.from,bdRange.to,viewAccounts(bdAccount));
   const months=data.months;
   if(months.length===0){ el.innerHTML=`<div class="empty" style="padding:40px"><h3>Invalid date range</h3><p>Make sure the start month is before the end month.</p></div>`; return; }
+
+  const un=unnettedCredits(bdRange.from,bdRange.to,viewAccounts(bdAccount));
+  const notice=document.getElementById('bdNotice');
+  if(notice){
+    notice.innerHTML = un.count>0 ? `<div class="notice-bar">
+      💵 <b>${un.count} refund${un.count===1?'':'s'}</b> totalling <b>${money(un.total)}</b> ${un.count===1?'is':'are'} not reducing any category total.
+      <button class="btn btn-sm" style="background:var(--ink);color:var(--paper);margin-left:8px" onclick="enableNetCredits()">Subtract refunds</button>
+      <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="clearLedgerFilters();ledger.flag='__credit__';switchView('transactions')">View them</button>
+    </div>` : '';
+  }
 
   const head=`<tr><th>Category</th><th class="total-col">Total</th>${months.map(m=>`<th>${m}</th>`).join('')}</tr>`;
   const cell=(byMonth,m)=>{ const v=byMonth[m]||0; return `<td>${v?money(v):'<span style="color:var(--line-strong)">·</span>'}</td>`; };
@@ -2520,6 +2563,13 @@ function ensureMigrations(){
   if(!state.settings.truthSeeded){
     if(state.truthTable.length===0) state.truthTable=seedTruthTable();
     state.settings.truthSeeded=true;
+    Store.saveLocalOnly();
+  }
+  // one-time: a refund on a card is simply money back in that category,
+  // so credits net against spending by default
+  if(!state.settings.netCreditsDefaulted){
+    if(state.settings.netCredits===undefined) state.settings.netCredits=true;
+    state.settings.netCreditsDefaulted=true;
     Store.saveLocalOnly();
   }
   // one-time: card payments are transfers, not spending -> stop counting them
