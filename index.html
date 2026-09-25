@@ -2314,7 +2314,7 @@ function renderLedger(skipFilters){
       <td class="keep td-check" onclick="event.stopPropagation()"><input type="checkbox" ${sel?'checked':''} aria-label="Select transaction" onchange="ledgerToggleSel('${t.id}',this.checked)"></td>
       <td class="num datecell td-date" data-label="Date" title="${esc(t.date)}">${esc(t.date)}</td>
       <td class="td-acct" data-label="Account">${esc(acctName(t.accountId))}${t.cardNumber?`<div style="font-size:11px;color:var(--ink-soft)">${esc(t.cardNumber)}</div>`:''}</td>
-      <td class="td-desc" data-label="Description" style="max-width:300px">${esc(t.description)}${fx}</td>
+      <td class="td-desc" data-label="Description" style="max-width:300px">${esc(t.description)}${t.splitOf?' <span class="cat-tag excluded" title="Part of a split">✂️ split</span>':''}${fx}</td>
       <td class="num td-spent" data-label="Spent">${t.spent?money(t.spent):''}</td>
       <td class="num td-credit" data-label="Credit" style="color:var(--good)">${t.credit?money(t.credit):''}</td>
       <td class="keep td-cat" data-label="Category" onclick="event.stopPropagation()"><select class="inline-cat" aria-label="Category" onchange="setTxnCategory('${t.id}',this.value)">${categoryOptions(t.categoryId)}</select></td>
@@ -2429,6 +2429,11 @@ function openTxnEditor(id){
     <div class="field"><label>Adjusted amount — overrides the final amount (e.g. your half of a split). Leave blank to use Spent.</label>
       <input id="e_adj" type="number" step="0.01" placeholder="blank = use ${money(t.spent)}" value="${(t.adjusted!==null&&t.adjusted!==undefined)?t.adjusted:''}"></div>
     <div class="field"><label>Notes</label><textarea id="e_notes" rows="2">${esc(t.notes||'')}</textarea></div>
+    ${t.splitOf?`<div style="padding:10px 12px;border-radius:9px;background:rgba(156,67,34,.07);border:1px solid var(--accent-soft);font-size:12.5px;margin-bottom:16px">
+        ✂️ Part of a split transaction.
+        <button type="button" class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="mergeSplit('${t.id}')">Merge back together</button></div>`
+      :`<div style="margin-bottom:16px"><button type="button" class="btn btn-ghost btn-sm" onclick="openSplitModal('${t.id}')">✂️ Split across categories</button>
+        <div style="font-size:12px;color:var(--ink-soft);margin-top:5px">For one purchase covering more than one category.</div></div>`}
     <label style="margin-bottom:8px">Flags</label>
     ${FLAG_DEFS.map(fd=>`<div class="checkline"><input type="checkbox" id="e_${fd.key}" ${f[fd.key]?'checked':''}><label for="e_${fd.key}">${fd.icon} ${fd.label}</label></div>`).join('')}
   `, [
@@ -2460,6 +2465,112 @@ function deleteTxn(id){
     Store.save(); updateBadge(); renderLedger();
     toast('Transaction deleted','',{label:'Undo',fn:performUndo});
   });
+}
+
+/* ---- splitting one purchase across categories ------------------------
+   An Amazon order can be half hygiene, half electronics. Splitting
+   replaces the original with parts that add up to the same amount, so
+   your totals never change — only how they're attributed. */
+let splitParts=[], splitTxnId=null;
+function splitBasis(t){
+  const spent=Number(t.spent)||0, credit=Number(t.credit)||0;
+  return spent>0 ? {field:'spent', amount:spent} : {field:'credit', amount:credit};
+}
+function openSplitModal(id){
+  const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  const b=splitBasis(t);
+  if(b.amount<=0){ toast('This transaction has no amount to split','bad'); return; }
+  splitTxnId=id;
+  splitParts=[{amount:b.amount, categoryId:t.categoryId||''},{amount:0, categoryId:''}];
+  renderSplitModal();
+}
+function renderSplitModal(){
+  const t=state.transactions.find(x=>x.id===splitTxnId); if(!t) return;
+  const b=splitBasis(t);
+  const used=splitParts.reduce((a,p)=>a+(Number(p.amount)||0),0);
+  const left=+(b.amount-used).toFixed(2);
+  setModal('Split transaction', `
+    <div style="margin-bottom:14px">
+      <div style="font-size:14px;font-weight:600">${esc(t.description)}</div>
+      <div style="font-size:12.5px;color:var(--ink-soft)">${esc(t.date)} · total ${money(b.amount)}</div>
+    </div>
+    ${splitParts.map((p,i)=>`<div class="row" style="align-items:flex-end;margin-bottom:8px">
+      <div class="field" style="flex:0 0 120px;margin:0"><label>Amount</label>
+        <input type="number" step="0.01" value="${p.amount||''}" aria-label="Part ${i+1} amount"
+          onchange="splitParts[${i}].amount=parseFloat(this.value)||0;renderSplitModal()"></div>
+      <div class="field" style="flex:1;margin:0"><label>Category</label>
+        <select aria-label="Part ${i+1} category" onchange="splitParts[${i}].categoryId=this.value">${categoryOptions(p.categoryId)}</select></div>
+      <button type="button" class="icon-btn" aria-label="Remove part" style="margin-bottom:9px"
+        ${splitParts.length<=2?'disabled style="opacity:.3;margin-bottom:9px"':''}
+        onclick="splitParts.splice(${i},1);renderSplitModal()">🗑</button>
+    </div>`).join('')}
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="splitParts.push({amount:0,categoryId:''});renderSplitModal()">+ Add part</button>
+      <div style="font-size:13.5px;font-weight:600;color:${Math.abs(left)<0.005?'var(--good)':'var(--warn)'}">
+        ${Math.abs(left)<0.005?'✓ Adds up':(left>0?`${money(left)} left to assign`:`${money(-left)} over`)}
+        ${Math.abs(left)>=0.005?`<button type="button" class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="fillSplitRemainder()">Put remainder in last part</button>`:''}
+      </div>
+    </div>
+  `, [
+    {label:'Cancel',cls:'btn-ghost',fn:()=>openTxnEditor(splitTxnId)},
+    {label:'Split it',cls:'btn-primary',fn:applySplit}
+  ]);
+}
+function fillSplitRemainder(){
+  const t=state.transactions.find(x=>x.id===splitTxnId); if(!t) return;
+  const b=splitBasis(t);
+  const others=splitParts.slice(0,-1).reduce((a,p)=>a+(Number(p.amount)||0),0);
+  splitParts[splitParts.length-1].amount=+(b.amount-others).toFixed(2);
+  renderSplitModal();
+}
+function applySplit(){
+  const t=state.transactions.find(x=>x.id===splitTxnId); if(!t) return;
+  const b=splitBasis(t);
+  const parts=splitParts.filter(p=>(Number(p.amount)||0)>0);
+  if(parts.length<2){ toast('Give at least two parts an amount','bad'); return; }
+  if(parts.some(p=>!p.categoryId)){ toast('Pick a category for every part','bad'); return; }
+  const used=parts.reduce((a,p)=>a+Number(p.amount),0);
+  if(Math.abs(used-b.amount)>=0.005){ toast('The parts must add up to the full amount','bad'); return; }
+
+  snapshotAllForUndo();
+  const parentId=t.splitOf||t.id;
+  const idx=state.transactions.findIndex(x=>x.id===t.id);
+  const children=parts.map((p,i)=>{
+    const c=JSON.parse(JSON.stringify(t));
+    c.id=uid();
+    c.spent = b.field==='spent' ? Number(p.amount) : 0;
+    c.credit = b.field==='credit' ? Number(p.amount) : 0;
+    c.categoryId=p.categoryId;
+    c.adjusted=null;
+    c.manualCategory=true;              // bulk re-apply must not undo the split
+    c.splitOf=parentId;
+    c.notes=(t.notes?t.notes+' · ':'')+`Split ${i+1} of ${parts.length}`;
+    c.flags=Object.assign({},t.flags||{},{needsReview:false});
+    return c;
+  });
+  state.transactions.splice(idx,1,...children);
+  Store.save(); updateBadge(); closeModal(); renderLedger();
+  toast(`Split into ${children.length} parts`,'good',{label:'Undo',fn:performUndo});
+}
+function mergeSplit(id){
+  const t=state.transactions.find(x=>x.id===id); if(!t||!t.splitOf) return;
+  const sibs=state.transactions.filter(x=>x.splitOf===t.splitOf);
+  if(sibs.length<2){ toast('Nothing to merge','bad'); return; }
+  snapshotAllForUndo();
+  const first=sibs[0];
+  const merged=JSON.parse(JSON.stringify(first));
+  merged.id=uid();
+  merged.spent=+sibs.reduce((a,x)=>a+(Number(x.spent)||0),0).toFixed(2);
+  merged.credit=+sibs.reduce((a,x)=>a+(Number(x.credit)||0),0).toFixed(2);
+  // keep the category of the largest part
+  merged.categoryId=sibs.slice().sort((a,b)=>(Number(b.spent)||Number(b.credit)||0)-(Number(a.spent)||Number(a.credit)||0))[0].categoryId;
+  merged.notes=(first.notes||'').replace(/\s*·?\s*Split \d+ of \d+/,'').trim();
+  delete merged.splitOf;
+  const idx=state.transactions.findIndex(x=>x.id===first.id);
+  state.transactions=state.transactions.filter(x=>x.splitOf!==t.splitOf);
+  state.transactions.splice(Math.max(0,idx),0,merged);
+  Store.save(); updateBadge(); closeModal(); renderLedger();
+  toast('Split merged back','good',{label:'Undo',fn:performUndo});
 }
 
 /* selection + bulk actions */
