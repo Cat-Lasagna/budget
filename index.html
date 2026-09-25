@@ -434,12 +434,14 @@ tr:last-child td{border-bottom:none}
   <section class="panel" data-view="truth">
     <div class="page-head"><h1>Truth Table</h1><p>Keyword rules that auto-sort your transactions into categories. The topmost matching rule wins.</p></div>
     <div id="ruleSuggestions"></div>
+    <div id="truthAudit"></div>
     <div class="card">
       <div class="card-head">
         <div style="flex:1;min-width:220px">
           <input id="truthSearch" placeholder="Search rules…" oninput="renderTruthTable()" style="max-width:320px">
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="runTruthAudit()">🩺 Health check</button>
           <button class="btn btn-ghost btn-sm" onclick="reapplyTruth()">↻ Re-apply to all</button>
           <button class="btn btn-ghost btn-sm" onclick="exportTruthCsv()">⬇ Export CSV</button>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('truthCsvFile').click()">⬆ Import CSV</button>
@@ -1194,10 +1196,10 @@ function renderKeywordStats(targetId, kw, excludeRuleId){
   el.innerHTML=`<b>Matches ${s.total}</b> transaction${s.total===1?'':'s'}`+
     (s.uncategorized?` · ${s.uncategorized} uncategorized`:'')+
     (s.alreadyOther?` · <span style="color:var(--ink-soft)">${s.alreadyOther} already categorized</span>`:'')+
-    ` <a href="#" style="color:var(--accent)" onclick="previewKeywordMatches(${JSON.stringify(kw).replace(/"/g,'&quot;')});return false">see them</a>`+
+    ` <a href="#" style="color:var(--accent)" onclick="previewFromRuleModal(${JSON.stringify(kw).replace(/"/g,'&quot;')},'${excludeRuleId||''}');return false">see them</a>`+
     (s.shadowedBy?`<div style="color:var(--warn);margin-top:4px">⚠️ An earlier rule "${esc(s.shadowedBy.keyword)}" already catches these — it wins unless you move this one above it.</div>`:'');
 }
-function previewKeywordMatches(kw){
+function previewKeywordMatches(kw, onBack){
   const q=(kw||'').toLowerCase();
   const hits=state.transactions.filter(t=>(t.description||'').toLowerCase().includes(q)).slice(0,25);
   setModal(`Transactions matching "${kw}"`,
@@ -1206,7 +1208,16 @@ function previewKeywordMatches(kw){
       <div style="font-size:12px;color:var(--ink-soft)">${esc(t.date)} · ${money(t.spent||0)} · ${esc(catName(t.categoryId)||'Uncategorized')}</div></div>`).join('')}</div>
       ${state.transactions.filter(t=>(t.description||'').toLowerCase().includes(q)).length>25?'<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Showing the first 25.</p>':''}`
     :'<p>No transactions match that keyword.</p>',
-    [{label:'Close',cls:'btn-primary',fn:closeModal}]);
+    onBack?[{label:'← Back to rule',cls:'btn-primary',fn:onBack}]
+          :[{label:'Close',cls:'btn-primary',fn:closeModal}]);
+}
+/* viewing matches from inside the rule dialog must not lose what you typed */
+function previewFromRuleModal(kw,id){
+  const kwEl=document.getElementById('r_kw'), catEl=document.getElementById('r_cat');
+  const keyword=kwEl?kwEl.value:kw;
+  const categoryId=catEl?catEl.value:null;
+  const opts=Object.assign({}, window._ruleOpts||{}, {keyword, categoryId});
+  previewKeywordMatches(keyword, ()=>openRuleModal(id||null, opts));
 }
 
 /* ---- suggested rules: cluster the uncategorized pile by merchant ----- */
@@ -1239,6 +1250,163 @@ function suggestedRules(limit){
     .sort((a,b)=>b.count-a.count)
     .slice(0,limit||8);
 }
+/* ---- truth table health check ---------------------------------------
+   Scans every rule against every transaction and reports the problems
+   that actually cost you accuracy: rules that can never fire, rules that
+   disagree with each other, and keywords that catch unrelated merchants. */
+function auditTruthTable(){
+  const rules=state.truthTable;
+  const low=rules.map(r=>(r.keyword||'').toLowerCase().trim());
+  const out={empty:[],duplicates:[],broken:[],dead:[],conflicts:[],noMatch:[],broad:[],disagree:[]};
+
+  const seen={};
+  rules.forEach((r,i)=>{
+    const k=low[i];
+    if(!k){ out.empty.push({rule:r,index:i}); return; }
+    if(seen[k]!==undefined) out.duplicates.push({rule:r,index:i,firstIndex:seen[k],first:rules[seen[k]]});
+    else seen[k]=i;
+    if(!r.categoryId || !catById(r.categoryId)) out.broken.push({rule:r,index:i});
+  });
+
+  // a rule can never fire if an earlier keyword is contained in it
+  rules.forEach((r,i)=>{
+    const k=low[i]; if(!k) return;
+    for(let j=0;j<i;j++){
+      const a=low[j]; if(!a || a===k) continue;
+      if(k.includes(a)){
+        const sameCat=rules[j].categoryId===r.categoryId;
+        (sameCat?out.dead:out.conflicts).push({rule:r,index:i,by:rules[j],byIndex:j});
+        break;
+      }
+    }
+  });
+
+  // match each rule against the real data
+  const descs=state.transactions.map(t=>({t,d:(t.description||'').toLowerCase()}));
+  rules.forEach((r,i)=>{
+    const k=low[i]; if(!k) return;
+    let hits=0; const others={};
+    descs.forEach(x=>{
+      if(!x.d.includes(k)) return;
+      hits++;
+      const c=x.t.categoryId;
+      if(c && c!==r.categoryId) others[c]=(others[c]||0)+1;
+    });
+    if(hits===0){ out.noMatch.push({rule:r,index:i}); return; }
+    const distinct=Object.keys(others).length;
+    const vals=Object.values(others);
+    const worst=vals.length?Math.max.apply(null,vals):0;
+    const clashes=vals.reduce((a,b)=>a+b,0);
+    // two or more transactions filed elsewhere, or a spread across categories,
+    // means the keyword is probably catching merchants it shouldn't
+    if(distinct>=2 || worst>=2){
+      out.broad.push({rule:r,index:i,hits,distinct,clashes,others});
+    }
+  });
+
+  out.broad.sort((a,b)=>b.clashes-a.clashes);
+
+  // transactions filed differently from what the rules would decide now
+  state.transactions.forEach(t=>{
+    if(!t.categoryId) return;
+    const m=categorize(t.description);
+    if(m && m.categoryId && m.categoryId!==t.categoryId) out.disagree.push({t,rule:m});
+  });
+  return out;
+}
+
+let auditCache=null;
+function runTruthAudit(){
+  auditCache=auditTruthTable();
+  renderTruthAudit();
+}
+function renderTruthAudit(){
+  const el=document.getElementById('truthAudit'); if(!el) return;
+  if(!auditCache){ el.innerHTML=''; return; }
+  const a=auditCache;
+  const totalIssues=a.empty.length+a.duplicates.length+a.broken.length+a.dead.length+
+    a.conflicts.length+a.noMatch.length+a.broad.length;
+  if(totalIssues===0 && a.disagree.length===0){
+    el.innerHTML=`<div class="card"><div class="empty" style="padding:26px"><div class="big">✅</div>
+      <h3>No problems found</h3><p>All ${state.truthTable.length} rules look healthy.</p></div></div>`;
+    return;
+  }
+  const ruleLine=(f,extra)=>`<div class="acct-item" style="flex-wrap:wrap">
+      <div class="meta" style="min-width:0;flex:1">
+        <div class="nm">${esc(f.rule.keyword||'(blank)')} <span style="font-weight:400;color:var(--ink-soft);font-size:12.5px">→ ${esc(catName(f.rule.categoryId)||'missing category')}</span></div>
+        <div class="det">${extra}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="previewKeywordMatches(${JSON.stringify(f.rule.keyword||'').replace(/"/g,'&quot;')})">View</button>
+        <button class="btn btn-ghost btn-sm" onclick="openRuleModal('${f.rule.id}')">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteRuleFromAudit('${f.rule.id}')">Delete</button>
+      </div></div>`;
+  const section=(title,desc,items,render,bulk)=>items.length?`<div class="card">
+      <div class="card-head"><div><h2>${title} <span style="font-weight:400;color:var(--ink-soft)">(${items.length})</span></h2>
+      <div class="sub">${desc}</div></div>${bulk||''}</div>
+      ${items.slice(0,25).map(render).join('')}
+      ${items.length>25?`<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Showing the first 25 of ${items.length}.</p>`:''}
+    </div>`:'';
+
+  el.innerHTML=
+    section('Conflicting rules',
+      'An earlier rule already catches everything these match, and files it somewhere else — so these never fire. Delete them, or drag them above the rule that blocks them.',
+      a.conflicts, f=>ruleLine(f,`blocked by "${esc(f.by.keyword)}" → ${esc(catName(f.by.categoryId)||'?')} (rule #${f.byIndex+1})`))
+    + section('Keywords that may be too broad',
+      'These match transactions you have filed under other categories, which usually means the keyword is catching unrelated merchants.',
+      a.broad, f=>ruleLine(f,`matches ${f.hits} transactions · ${f.clashes} filed elsewhere: ${Object.keys(f.others).map(c=>esc(catName(c)||'?')+' ('+f.others[c]+')').join(', ')}`))
+    + section('Duplicate keywords',
+      'The same keyword appears more than once. Only the first one ever runs.',
+      a.duplicates, f=>ruleLine(f,`same keyword as rule #${f.firstIndex+1} → ${esc(catName(f.first.categoryId)||'?')}`),
+      `<button class="btn btn-danger btn-sm" onclick="bulkDeleteAudit('duplicates')">Delete all duplicates</button>`)
+    + section('Rules that can never fire',
+      'A broader earlier rule with the same category already covers these. Harmless, but clutter.',
+      a.dead, f=>ruleLine(f,`already covered by "${esc(f.by.keyword)}" (rule #${f.byIndex+1})`),
+      `<button class="btn btn-danger btn-sm" onclick="bulkDeleteAudit('dead')">Delete all</button>`)
+    + section('Broken rules',
+      'These point at a category that no longer exists, so they file nothing.',
+      a.broken, f=>ruleLine(f,'category missing — pick a new one or delete the rule'),
+      `<button class="btn btn-danger btn-sm" onclick="bulkDeleteAudit('broken')">Delete all</button>`)
+    + section('Blank keywords','Rules with no keyword do nothing.',
+      a.empty, f=>ruleLine(f,'no keyword'),
+      `<button class="btn btn-danger btn-sm" onclick="bulkDeleteAudit('empty')">Delete all</button>`)
+    + section('Rules that match nothing',
+      'These match no transaction in your history. Fine if you simply have not shopped there yet.',
+      a.noMatch, f=>ruleLine(f,'0 matches in your current transactions'))
+    + (a.disagree.length?`<div class="card">
+        <div class="card-head"><div><h2>Transactions that disagree with your rules <span style="font-weight:400;color:var(--ink-soft)">(${a.disagree.length})</span></h2>
+        <div class="sub">These are filed differently from what your rules would choose today. That is expected if you categorized them by hand — but it also reveals old mistakes.</div></div></div>
+        ${a.disagree.slice(0,15).map(d=>`<div class="acct-item" style="flex-wrap:wrap">
+          <div class="meta" style="min-width:0;flex:1"><div class="nm">${esc(d.t.description)}</div>
+          <div class="det">filed as <b>${esc(catName(d.t.categoryId)||'?')}</b> · rule "${esc(d.rule.keyword)}" says <b>${esc(catName(d.rule.categoryId)||'?')}</b></div></div>
+          <button class="btn btn-ghost btn-sm" onclick="acceptRuleFor('${d.t.id}')">Use the rule</button>
+        </div>`).join('')}
+        ${a.disagree.length>15?`<p style="font-size:12.5px;color:var(--ink-soft);margin:10px 0 0">Showing the first 15 of ${a.disagree.length}.</p>`:''}
+      </div>`:'');
+}
+function deleteRuleFromAudit(id){
+  state.truthTable=state.truthTable.filter(r=>r.id!==id);
+  Store.save(); runTruthAudit(); renderTruthTable(); toast('Rule deleted');
+}
+function bulkDeleteAudit(kind){
+  const items=(auditCache||{})[kind]||[];
+  if(!items.length) return;
+  const ids=new Set(items.map(f=>f.rule.id));
+  confirmDialog('Delete rules',`Delete ${ids.size} rule${ids.size===1?'':'s'}? Your transactions are not affected.`,()=>{
+    state.truthTable=state.truthTable.filter(r=>!ids.has(r.id));
+    Store.save(); runTruthAudit(); renderTruthTable();
+    toast(`Deleted ${ids.size} rule${ids.size===1?'':'s'}`,'good');
+  });
+}
+function acceptRuleFor(txnId){
+  const t=state.transactions.find(x=>x.id===txnId); if(!t) return;
+  const m=categorize(t.description); if(!m) return;
+  snapshotForUndo([t.id]);
+  t.categoryId=m.categoryId;
+  Store.save(); updateBadge(); runTruthAudit();
+  toast(`Refiled as ${catName(m.categoryId)}`,'good',{label:'Undo',fn:performUndo});
+}
+
 function renderSuggestedRules(){
   const el=document.getElementById('ruleSuggestions'); if(!el) return;
   const sug=suggestedRules(8);
@@ -1277,6 +1445,7 @@ function dismissSuggestion(kw){
 
 function renderTruthTable(){
   renderSuggestedRules();
+  renderTruthAudit();
   const el=document.getElementById('truthList');
   const q=(document.getElementById('truthSearch').value||'').toLowerCase();
   const rules = state.truthTable
@@ -1317,10 +1486,12 @@ function moveRule(i,dir){
 
 function openRuleModal(id, opts){
   opts=opts||{};
+  window._ruleOpts=opts;                      // so "see them" can come back here
   const r = id ? state.truthTable.find(x=>x.id===id) : null;
   const seedDesc = opts.fromDescription || '';
   const chips = seedDesc ? rankKeywords(seedDesc) : [];
-  const startKw = r ? r.keyword : (chips[0] || '');
+  const startKw = (opts.keyword!==undefined && opts.keyword!==null)
+    ? opts.keyword : (r ? r.keyword : (chips[0] || ''));
   setModal(r?'Edit rule':'Add rule', `
     ${seedDesc?`<div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">From: ${esc(seedDesc)}</div>`:''}
     <div class="field"><label>Keyword to look for (case-insensitive)</label>
@@ -1330,7 +1501,9 @@ function openRuleModal(id, opts){
       </div><div style="font-size:11.5px;color:var(--ink-soft);margin:-8px 0 14px">Shorter keywords catch more of the same merchant.</div>`:''}
     <div id="r_stats" style="font-size:12.5px;margin-bottom:14px"></div>
     <div class="field"><label>Assign this category</label>
-      <select id="r_cat">${categoryOptions(r?r.categoryId:(opts.categoryId||null))}</select></div>
+      <select id="r_cat">${categoryOptions(
+        (opts.categoryId!==undefined && opts.categoryId!==null && opts.categoryId!=='')
+          ? opts.categoryId : (r?r.categoryId:null))}</select></div>
     <p style="font-size:12.5px;color:var(--ink-soft)">Any transaction whose description contains this keyword will be filed under the chosen category.</p>
   `, [
     {label:'Cancel',cls:'btn-ghost',fn:opts.onCancel||closeModal},
