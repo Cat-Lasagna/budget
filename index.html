@@ -369,6 +369,9 @@ tr:last-child td{border-bottom:none}
 .chart-card{background:var(--paper-2);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:20px}
 .chart-card h2{font-family:var(--serif);font-size:20px;font-weight:600;margin-bottom:16px}
 .chart-box{position:relative;height:340px}
+.kwchip{font:inherit;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:20px;cursor:pointer;
+  background:var(--paper);border:1px solid var(--line-strong);color:var(--ink)}
+.kwchip:hover{border-color:var(--accent);color:var(--accent)}
 .notice-bar{margin-top:14px;padding:11px 14px;border-radius:10px;font-size:13.5px;
   background:rgba(156,67,34,.08);border:1px solid var(--accent-soft);color:var(--ink);
   display:flex;align-items:center;gap:4px;flex-wrap:wrap}
@@ -430,6 +433,7 @@ tr:last-child td{border-bottom:none}
   <!-- TRUTH TABLE -->
   <section class="panel" data-view="truth">
     <div class="page-head"><h1>Truth Table</h1><p>Keyword rules that auto-sort your transactions into categories. The topmost matching rule wins.</p></div>
+    <div id="ruleSuggestions"></div>
     <div class="card">
       <div class="card-head">
         <div style="flex:1;min-width:220px">
@@ -490,6 +494,8 @@ tr:last-child td{border-bottom:none}
         <div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;color:var(--ink-soft)">Preferences</div>
         <label class="checkline" style="margin:0"><input type="checkbox" id="netCreditsChk" style="width:auto" onchange="toggleNetCredits(this.checked)">
           <span>Subtract refunds from their category<br><span style="font-size:12px;color:var(--ink-soft);font-weight:400">On by default. A $100 refund on a $300 charge means that category shows $200. Transactions where you typed an Adjusted amount keep your number instead.</span></span></label>
+        <label class="checkline" style="margin:10px 0 0"><input type="checkbox" id="rulePromptChk" style="width:auto" onchange="toggleRulePrompt(this.checked)">
+          <span>Offer to make a rule when I categorize something by hand<br><span style="font-size:12px;color:var(--ink-soft);font-weight:400">Only appears for transactions no rule covers yet.</span></span></label>
         <div id="dataSizeInfo" style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)"></div>
       </div>
       <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
@@ -741,7 +747,7 @@ function renderDashboard(){
       <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">Owed back · tap to view →</div></div>`:''}
     <div class="stat" ${reviewN?`style="cursor:pointer" onclick="clearLedgerFilters();ledger.needsReview=true;switchView('transactions')" role="button" tabindex="0" aria-label="Review ${reviewN} uncategorized transactions"`:''}>
       <div class="k">Needs review</div><div class="v" style="color:${reviewN?'var(--danger)':'var(--good)'}">${reviewN}</div>
-      ${reviewN?'<div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">Tap to review →</div>':''}</div>`;
+      ${reviewN?`<button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="event.stopPropagation();startReviewQueue()">⚡ Review one by one</button>`:''}</div>`;
 
   // recent activity
   const recent=txns.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,6);
@@ -938,6 +944,8 @@ function deleteCategory(id){
 function renderPrefs(){
   const chk=document.getElementById('netCreditsChk');
   if(chk) chk.checked=!!(state.settings&&state.settings.netCredits);
+  const rp=document.getElementById('rulePromptChk');
+  if(rp) rp.checked=!(state.settings&&state.settings.noRulePrompt);
   const el=document.getElementById('dataSizeInfo');
   if(el){
     let bytes=0;
@@ -953,6 +961,10 @@ function enableNetCredits(){
   state.settings.netCredits=true; Store.save();
   renderBreakdown();
   toast('Refunds now reduce category totals','good');
+}
+function toggleRulePrompt(on){
+  state.settings.noRulePrompt=!on; Store.save();
+  toast(on?'Rule suggestions on':'Rule suggestions off','good');
 }
 function toggleNetCredits(on){
   state.settings.netCredits=!!on;
@@ -1062,7 +1074,209 @@ function autoProcess(txn, opts){
   else f.needsReview = review;
 }
 
+/* ---- review queue: one transaction at a time, sized for thumbs ------- */
+let reviewQueue=[], reviewIdx=0, reviewDone=0;
+function startReviewQueue(){
+  reviewQueue=state.transactions
+    .filter(t=>t.flags&&t.flags.needsReview)
+    .sort((a,b)=>(b.date||'').localeCompare(a.date||''))
+    .map(t=>t.id);
+  reviewIdx=0; reviewDone=0;
+  if(!reviewQueue.length){ toast('Nothing needs review','good'); return; }
+  renderReviewCard();
+}
+function renderReviewCard(){
+  if(reviewIdx>=reviewQueue.length){
+    setModal('Review complete', `<div style="text-align:center;padding:10px">
+      <div style="font-size:42px">🎉</div>
+      <p style="font-size:15px;margin-top:8px">You filed <b>${reviewDone}</b> transaction${reviewDone===1?'':'s'}.</p>
+      ${state.transactions.filter(t=>t.flags&&t.flags.needsReview).length?`<p style="font-size:13px;color:var(--ink-soft);margin-top:6px">${state.transactions.filter(t=>t.flags&&t.flags.needsReview).length} still need review.</p>`:''}
+    </div>`, [{label:'Done',cls:'btn-primary',fn:()=>{closeModal();renderLedger();}}]);
+    return;
+  }
+  const t=state.transactions.find(x=>x.id===reviewQueue[reviewIdx]);
+  if(!t){ reviewIdx++; return renderReviewCard(); }
+  const chips=rankKeywords(t.description);
+  const guess=chips[0]?keywordStats(chips[0]):null;
+  const similar=guess?Math.max(0,guess.total-1):0;
+  setModal(`Review ${reviewIdx+1} of ${reviewQueue.length}`, `
+    <div style="text-align:center;padding:4px 0 14px">
+      <div style="font-family:var(--serif);font-size:20px;font-weight:600;line-height:1.3">${esc(t.description)}</div>
+      <div style="font-size:13px;color:var(--ink-soft);margin-top:6px">${esc(t.date)} · ${esc(acctName(t.accountId))}</div>
+      <div style="font-family:var(--serif);font-size:30px;font-weight:600;margin-top:10px">${t.credit?'+'+money(t.credit):money(t.spent||0)}</div>
+      ${similar?`<div style="font-size:12.5px;color:var(--accent);margin-top:8px">${similar} similar transaction${similar===1?'':'s'} in your history</div>`:''}
+    </div>
+    <div class="field"><label>Category</label>
+      <select id="rq_cat" style="padding:12px;font-size:15px">${categoryOptions(t.categoryId)}</select></div>
+    <label class="checkline" style="margin-top:4px"><input type="checkbox" id="rq_rule" style="width:auto" ${similar?'checked':''}>
+      <span>Also make a rule so this files itself next time</span></label>
+  `, [
+    {label:'Skip',cls:'btn-ghost',fn:()=>{reviewIdx++;renderReviewCard();}},
+    {label:'Save &amp; next',cls:'btn-primary',fn:saveReviewCard}
+  ]);
+}
+function saveReviewCard(){
+  const t=state.transactions.find(x=>x.id===reviewQueue[reviewIdx]);
+  const catId=val('rq_cat');
+  const wantRule=document.getElementById('rq_rule').checked;
+  if(!catId){ toast('Pick a category, or tap Skip','bad'); return; }
+  t.categoryId=catId; t.flags=t.flags||{}; t.flags.needsReview=false;
+  reviewDone++; Store.save(); updateBadge();
+  const desc=t.description;
+  reviewIdx++;
+  if(wantRule && !categorize(desc)){
+    // let them confirm the keyword, then carry on down the queue
+    openRuleModal(null,{fromDescription:desc, categoryId:catId,
+      onSaved:renderReviewCard, onCancel:renderReviewCard});
+    return;
+  }
+  renderReviewCard();
+}
+
+/* ---- keyword intelligence -------------------------------------------
+   A raw description like "TIM HORTONS #1869 MARKHAM ON" makes a terrible
+   rule: it matches one store in one city. These helpers propose broader
+   keywords and show how many transactions each would actually catch. */
+const PROV_STATE=/\s+(ON|QC|BC|AB|MB|SK|NS|NB|NL|PE|NT|NU|YT|NY|CA|TX|FL|WA|MI|OR|AZ|IL|MA|NV|OH|PA|GA|CO|NC|VA|TN|MN|WI|IN|MO|MD|UT|NJ|SC|AL|KY|OK|IA|KS|AR|MS|NE|NM|ID|WV|HI|ME|NH|RI|MT|DE|SD|ND|AK|VT|WY|DC)\s*$/i;
+function suggestKeywords(desc){
+  const full=(desc||'').replace(/\s+/g,' ').trim();
+  let s=full.replace(FX_RE,'').trim();          // drop "452.21 MYR @ .346896"
+  s=s.replace(/^[A-Za-z]{2,6}\s*\*+\s*/,'');    // SQ * / TST- / BP* processor prefixes
+  s=s.replace(PROV_STATE,'');                   // trailing province or state code
+  // noise becomes a break: whatever follows a store/reference number is
+  // usually a city, not part of the merchant name
+  s=s.replace(/[#*]\s*\d+/g,' | ');
+  s=s.replace(/\b\d{4,}\b/g,' | ');
+  s=s.replace(/,/g,' | ');
+  const seg=s.split('|')[0].replace(/\s+/g,' ').trim();
+  const words=seg.split(' ').filter(Boolean);
+  const out=[];
+  const push=v=>{ v=(v||'').trim(); if(v.length>=3 && !out.some(x=>x.toLowerCase()===v.toLowerCase())) out.push(v); };
+  if(words.length>=2) push(words.slice(0,2).join(' '));
+  if(words[0] && words[0].length>=6) push(words[0]);   // distinctive single word
+  if(words.length>=3) push(words.slice(0,3).join(' '));
+  push(seg);
+  push(full);
+  return out.slice(0,5);
+}
+/* order candidates by how much of your history they'd actually catch;
+   among equally useful ones prefer the more specific (longer) keyword */
+function rankKeywords(desc){
+  const cands=suggestKeywords(desc);
+  return cands.map(k=>{ const s=keywordStats(k); return {k, n:s?s.total:0}; })
+    .sort((a,b)=> b.n-a.n || b.k.length-a.k.length)
+    .map(x=>x.k);
+}
+/* how many transactions a keyword would catch, and what it might disturb */
+function keywordStats(kw, excludeRuleId){
+  const q=(kw||'').trim().toLowerCase();
+  if(q.length<2) return null;
+  let total=0, uncategorized=0, alreadyOther=0;
+  state.transactions.forEach(t=>{
+    if(!(t.description||'').toLowerCase().includes(q)) return;
+    total++;
+    if(!t.categoryId) uncategorized++; else alreadyOther++;
+  });
+  // an earlier rule may already claim these descriptions
+  let shadowedBy=null;
+  for(const r of state.truthTable){
+    if(excludeRuleId && r.id===excludeRuleId) continue;
+    if(!r.keyword) continue;
+    if(q.includes(r.keyword.toLowerCase())){ shadowedBy=r; break; }
+  }
+  return {total, uncategorized, alreadyOther, shadowedBy};
+}
+function renderKeywordStats(targetId, kw, excludeRuleId){
+  const el=document.getElementById(targetId); if(!el) return;
+  const s=keywordStats(kw, excludeRuleId);
+  if(!s){ el.innerHTML='<span style="color:var(--ink-soft)">Type a keyword to see what it matches.</span>'; return; }
+  if(s.total===0){ el.innerHTML='<span style="color:var(--warn)">Matches nothing in your current transactions.</span>'; return; }
+  el.innerHTML=`<b>Matches ${s.total}</b> transaction${s.total===1?'':'s'}`+
+    (s.uncategorized?` · ${s.uncategorized} uncategorized`:'')+
+    (s.alreadyOther?` · <span style="color:var(--ink-soft)">${s.alreadyOther} already categorized</span>`:'')+
+    ` <a href="#" style="color:var(--accent)" onclick="previewKeywordMatches(${JSON.stringify(kw).replace(/"/g,'&quot;')});return false">see them</a>`+
+    (s.shadowedBy?`<div style="color:var(--warn);margin-top:4px">⚠️ An earlier rule "${esc(s.shadowedBy.keyword)}" already catches these — it wins unless you move this one above it.</div>`:'');
+}
+function previewKeywordMatches(kw){
+  const q=(kw||'').toLowerCase();
+  const hits=state.transactions.filter(t=>(t.description||'').toLowerCase().includes(q)).slice(0,25);
+  setModal(`Transactions matching "${kw}"`,
+    hits.length?`<div style="max-height:50vh;overflow:auto">${hits.map(t=>`<div style="padding:7px 0;border-bottom:1px solid var(--line)">
+      <div style="font-size:14px">${esc(t.description)}</div>
+      <div style="font-size:12px;color:var(--ink-soft)">${esc(t.date)} · ${money(t.spent||0)} · ${esc(catName(t.categoryId)||'Uncategorized')}</div></div>`).join('')}</div>
+      ${state.transactions.filter(t=>(t.description||'').toLowerCase().includes(q)).length>25?'<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Showing the first 25.</p>':''}`
+    :'<p>No transactions match that keyword.</p>',
+    [{label:'Close',cls:'btn-primary',fn:closeModal}]);
+}
+
+/* ---- suggested rules: cluster the uncategorized pile by merchant ----- */
+function suggestedRules(limit){
+  const rows=[];
+  state.transactions.forEach(t=>{
+    if(t.categoryId) return;
+    const f=t.flags||{};
+    if(f.isBalancing||f.isInterAccountTransfer) return;
+    const cands=suggestKeywords(t.description);
+    if(cands.length) rows.push({t, cands});
+  });
+  // how many uncategorized rows each candidate keyword would cover
+  const freq={};
+  rows.forEach(r=>r.cands.forEach(k=>{ const kk=k.toLowerCase(); freq[kk]=(freq[kk]||0)+1; }));
+  // each row votes for its broadest useful candidate
+  const groups={};
+  rows.forEach(r=>{
+    let best=null, bestN=-1;
+    r.cands.forEach(k=>{ const n=freq[k.toLowerCase()]||0;
+      if(n>bestN || (n===bestN && best && k.length>best.length)){ best=k; bestN=n; } });
+    if(!best) return;
+    const kk=best.toLowerCase();
+    if(!groups[kk]) groups[kk]={keyword:best,count:0,sample:r.t.description,total:0};
+    groups[kk].count++; groups[kk].total+=finalAmount(r.t);
+  });
+  const dismissed=state.settings.dismissedSuggestions||[];
+  return Object.values(groups)
+    .filter(g=>g.count>=2 && !categorize(g.keyword) && !dismissed.includes(g.keyword.toLowerCase()))
+    .sort((a,b)=>b.count-a.count)
+    .slice(0,limit||8);
+}
+function renderSuggestedRules(){
+  const el=document.getElementById('ruleSuggestions'); if(!el) return;
+  const sug=suggestedRules(8);
+  if(!sug.length){ el.innerHTML=''; return; }
+  el.innerHTML=`<div class="card">
+    <div class="card-head"><div><h2>Suggested rules</h2>
+      <div class="sub">Merchants that show up repeatedly in your uncategorized transactions. Pick a category and file them all at once.</div></div></div>
+    ${sug.map((g,i)=>`<div class="acct-item" style="flex-wrap:wrap">
+      <div class="meta" style="min-width:0;flex:1">
+        <div class="nm">${esc(g.keyword)}</div>
+        <div class="det">${g.count} transaction${g.count===1?'':'s'} · ${money(g.total)} · e.g. ${esc(g.sample)}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="sug_${i}" style="width:auto;min-width:150px;padding:6px 10px;font-size:13px">${categoryOptions(null)}</select>
+        <button class="btn btn-primary btn-sm" onclick="acceptSuggestion(${i})">Add rule</button>
+        <button class="icon-btn" title="Dismiss" aria-label="Dismiss suggestion" onclick="dismissSuggestion(${JSON.stringify(g.keyword).replace(/"/g,'&quot;')})">×</button>
+      </div>
+    </div>`).join('')}
+  </div>`;
+  window._sugCache=sug;
+}
+function acceptSuggestion(i){
+  const g=(window._sugCache||[])[i]; if(!g) return;
+  const catId=document.getElementById('sug_'+i).value;
+  if(!catId){ toast('Pick a category first','bad'); return; }
+  state.truthTable.unshift({id:uid(),keyword:g.keyword,categoryId:catId,matchType:'contains'});
+  const filed=applyRulesToReview();
+  Store.save(); updateBadge(); renderTruthTable();
+  toast(`Rule added — ${filed} transaction${filed===1?'':'s'} filed`,'good');
+}
+function dismissSuggestion(kw){
+  state.settings.dismissedSuggestions=state.settings.dismissedSuggestions||[];
+  state.settings.dismissedSuggestions.push(String(kw).toLowerCase());
+  Store.save(); renderTruthTable();
+}
+
 function renderTruthTable(){
+  renderSuggestedRules();
   const el=document.getElementById('truthList');
   const q=(document.getElementById('truthSearch').value||'').toLowerCase();
   const rules = state.truthTable
@@ -1101,21 +1315,45 @@ function moveRule(i,dir){
   Store.save(); renderTruthTable();
 }
 
-function openRuleModal(id){
+function openRuleModal(id, opts){
+  opts=opts||{};
   const r = id ? state.truthTable.find(x=>x.id===id) : null;
+  const seedDesc = opts.fromDescription || '';
+  const chips = seedDesc ? rankKeywords(seedDesc) : [];
+  const startKw = r ? r.keyword : (chips[0] || '');
   setModal(r?'Edit rule':'Add rule', `
+    ${seedDesc?`<div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">From: ${esc(seedDesc)}</div>`:''}
     <div class="field"><label>Keyword to look for (case-insensitive)</label>
-      <input id="r_kw" placeholder="e.g. ESSO CIRCLE K" value="${r?esc(r.keyword):''}"></div>
+      <input id="r_kw" placeholder="e.g. ESSO CIRCLE K" value="${esc(startKw)}" oninput="onRuleKeywordInput('${id||''}')"></div>
+    ${chips.length?`<div style="margin:-6px 0 14px;display:flex;gap:6px;flex-wrap:wrap">
+      ${chips.map(ch=>`<button type="button" class="kwchip" onclick="pickKeyword(${JSON.stringify(ch).replace(/"/g,'&quot;')},'${id||''}')">${esc(ch)}</button>`).join('')}
+      </div><div style="font-size:11.5px;color:var(--ink-soft);margin:-8px 0 14px">Shorter keywords catch more of the same merchant.</div>`:''}
+    <div id="r_stats" style="font-size:12.5px;margin-bottom:14px"></div>
     <div class="field"><label>Assign this category</label>
-      <select id="r_cat">${categoryOptions(r?r.categoryId:null)}</select></div>
+      <select id="r_cat">${categoryOptions(r?r.categoryId:(opts.categoryId||null))}</select></div>
     <p style="font-size:12.5px;color:var(--ink-soft)">Any transaction whose description contains this keyword will be filed under the chosen category.</p>
   `, [
-    {label:'Cancel',cls:'btn-ghost',fn:closeModal},
-    {label:r?'Save rule':'Add rule',cls:'btn-primary',fn:()=>saveRule(id)}
+    {label:'Cancel',cls:'btn-ghost',fn:opts.onCancel||closeModal},
+    {label:r?'Save rule':'Add rule',cls:'btn-primary',fn:()=>saveRule(id,opts)}
   ]);
-  setTimeout(()=>document.getElementById('r_kw').focus(),50);
+  renderKeywordStats('r_stats', startKw, id||null);
+  setTimeout(()=>{ const el=document.getElementById('r_kw'); if(el && !opts.noFocus) el.focus(); },50);
 }
-function saveRule(id){
+let ruleKwTimer=null;
+function onRuleKeywordInput(id){
+  clearTimeout(ruleKwTimer);
+  ruleKwTimer=setTimeout(()=>{
+    const el=document.getElementById('r_kw'); if(!el) return;
+    renderKeywordStats('r_stats', el.value, id||null);
+  },200);
+}
+function pickKeyword(kw,id){
+  const el=document.getElementById('r_kw'); if(!el) return;
+  el.value=kw;
+  renderKeywordStats('r_stats', kw, id||null);
+}
+function saveRule(id,opts){
+  opts=opts||{};
   const kw=val('r_kw').trim();
   const categoryId=val('r_cat')||null;
   if(!kw){ toast('Enter a keyword','bad'); return; }
@@ -1123,8 +1361,11 @@ function saveRule(id){
   if(id){ Object.assign(state.truthTable.find(x=>x.id===id),{keyword:kw,categoryId}); }
   else { state.truthTable.unshift({id:uid(),keyword:kw,categoryId,matchType:'contains'}); }
   const filed=applyRulesToReview();
-  Store.save(); updateBadge(); closeModal(); renderTruthTable();
-  toast(`Rule saved${filed?` — ${filed} review item${filed===1?'':'s'} auto-filed`:''}`,'good');
+  Store.save(); updateBadge(); closeModal();
+  if(currentView==='truth') renderTruthTable();
+  if(currentView==='transactions') renderLedger();
+  toast(`Rule saved${filed?` — ${filed} more transaction${filed===1?'':'s'} filed automatically`:''}`,'good');
+  if(opts.onSaved) opts.onSaved();
 }
 
 /* re-check only the transactions that still need review; if a rule now
@@ -1945,6 +2186,7 @@ function renderLedgerFilters(){
       <option value="__credit__" ${ledger.flag==='__credit__'?'selected':''}>💵 Has refund / credit</option>
       ${FLAG_DEFS.filter(f=>f.key!=='needsReview').map(f=>`<option value="${f.key}" ${ledger.flag===f.key?'selected':''}>${f.icon} ${f.label}</option>`).join('')}</select></div>
     <div class="fg"><label>&nbsp;</label><span class="chip ${ledger.needsReview?'on':''}" role="button" tabindex="0" onclick="ledger.needsReview=!ledger.needsReview;ledger.page=1;renderLedger()">⚠️ Needs review${reviewN?` (${reviewN})`:''}</span></div>
+    ${reviewN?`<div class="fg"><label>&nbsp;</label><button class="btn btn-primary btn-sm" onclick="startReviewQueue()">⚡ Review ${reviewN} one by one</button></div>`:''}
     <div class="fg"><label>&nbsp;</label><button class="btn btn-ghost btn-sm" onclick="clearLedgerFilters()">Clear</button></div>`;
 }
 function clearLedgerFilters(){ Object.assign(ledger,{search:'',accountId:'',parent:'',sub:'',flag:'',from:'',to:'',needsReview:false,page:1}); renderLedger(); }
@@ -1953,9 +2195,29 @@ function ledgerPage(d){ ledger.page+=d; renderLedger(); }
 
 function setTxnCategory(id,catId){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  const wasUncategorized=!t.categoryId;
   t.categoryId=catId||null;
   if(catId && t.flags) t.flags.needsReview=false;   // assigning a category clears review
   Store.save(); updateBadge(); renderLedger();
+  if(catId && wasUncategorized) maybeOfferRule(t);
+}
+
+/* After you file something by hand, offer to turn it into a rule — but only
+   when it would actually help: the row had no category, no existing rule
+   covers it, and you haven't switched the prompt off. */
+function maybeOfferRule(t){
+  if(state.settings && state.settings.noRulePrompt) return;
+  if(!t || !t.categoryId || !t.description) return;
+  if(categorize(t.description)) return;              // a rule already handles this
+  const chips=rankKeywords(t.description);
+  if(!chips.length) return;
+  const kw=chips[0];
+  const s=keywordStats(kw);
+  const others=s?Math.max(0,s.total-1):0;
+  toast(`Filed as ${catName(t.categoryId)}`,'good',{
+    label: others?`Make a rule (${others} similar)`:'Make a rule',
+    fn:()=>openRuleModal(null,{fromDescription:t.description, categoryId:t.categoryId})
+  });
 }
 function toggleTxnFlag(id,key){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
@@ -1991,6 +2253,7 @@ function openTxnEditor(id){
 }
 function saveTxnEdit(id){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  const wasUncategorized=!t.categoryId;
   t.date=val('e_date'); t.accountId=val('e_acct'); t.description=val('e_desc');
   t.spent=toNum(val('e_spent')); t.credit=toNum(val('e_credit'));
   t.categoryId=val('e_cat')||null;
@@ -1999,7 +2262,9 @@ function saveTxnEdit(id){
   t.flags=t.flags||{};
   FLAG_DEFS.forEach(fd=>{ t.flags[fd.key]=document.getElementById('e_'+fd.key).checked; });
   t.originalCurrencyString=detectForeign(t.description);
-  Store.save(); updateBadge(); closeModal(); renderLedger(); toast('Transaction updated','good');
+  Store.save(); updateBadge(); closeModal(); renderLedger();
+  if(t.categoryId && wasUncategorized) maybeOfferRule(t);
+  else toast('Transaction updated','good');
 }
 function deleteTxn(id){
   confirmDialog('Delete transaction','Delete this transaction?',()=>{
@@ -2391,6 +2656,13 @@ const CLIENT_ID_KEY='ledger_google_client_id';
 function getClientId(){
   let ls=null; try{ ls=localStorage.getItem(CLIENT_ID_KEY); }catch(e){}
   if(ls && ls.trim() && ls.indexOf('YOUR_CLIENT_ID')===-1) return ls.trim();
+  // fall back to the copy kept in the app data (survives a cleared browser,
+  // and comes back with a JSON backup restore)
+  const fromState=state && state.settings && state.settings.googleClientId;
+  if(fromState && fromState.indexOf('YOUR_CLIENT_ID')===-1){
+    try{ localStorage.setItem(CLIENT_ID_KEY, fromState); }catch(e){}
+    return fromState;
+  }
   if(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_ID.indexOf('YOUR_CLIENT_ID')===-1) return GOOGLE_CLIENT_ID;
   return null;
 }
@@ -2398,6 +2670,8 @@ function saveClientId(){
   const v=(document.getElementById('clientIdInput').value||'').trim();
   if(!v || v.indexOf('.apps.googleusercontent.com')===-1){ toast('That doesn\u2019t look like a Client ID','bad'); return; }
   try{ localStorage.setItem(CLIENT_ID_KEY, v); }catch(e){}
+  state.settings.googleClientId=v;   // backed up with your data
+  Store.saveLocalOnly();
   editingClientId=false;
   toast('Client ID saved','good');
   initSync();
@@ -2535,7 +2809,8 @@ function updateSyncCard(){
     el.innerHTML=`<div class="sync-status" style="flex-direction:column;align-items:stretch;gap:10px">
       <div style="display:flex;align-items:center;gap:10px"><span class="sdot" style="background:${cid?'var(--good)':'var(--ink-soft)'}"></span>
         <div><b>${cid?'Change Google Client ID':'Cloud sync not set up'}</b>
-        <div style="font-size:12.5px;color:var(--ink-soft)">Paste your Google Client ID to sync this device with Google Drive. It's saved on this device, so app updates won't erase it.</div></div></div>
+        <div style="font-size:12.5px;color:var(--ink-soft)">Paste your Google Client ID to sync this device with Google Drive. It's saved on this device and included in your backups, so app updates won't erase it.<br>
+        Find it in Google Cloud console under APIs &amp; Services → Credentials, or on another signed-in device under Change Client ID.</div></div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="clientIdInput" aria-label="Google Client ID" placeholder="xxxxx.apps.googleusercontent.com" value="${cid?esc(cid):''}" style="flex:1;min-width:220px">
         <button class="btn btn-primary btn-sm" onclick="saveClientId()">Save &amp; connect</button>
