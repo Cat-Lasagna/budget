@@ -1385,17 +1385,20 @@ function renderTruthAudit(){
       </div>`:'');
 }
 function deleteRuleFromAudit(id){
+  snapshotRulesForUndo();
   state.truthTable=state.truthTable.filter(r=>r.id!==id);
-  Store.save(); runTruthAudit(); renderTruthTable(); toast('Rule deleted');
+  Store.save(); runTruthAudit(); renderTruthTable();
+  toast('Rule deleted','',{label:'Undo',fn:performUndo});
 }
 function bulkDeleteAudit(kind){
   const items=(auditCache||{})[kind]||[];
   if(!items.length) return;
   const ids=new Set(items.map(f=>f.rule.id));
   confirmDialog('Delete rules',`Delete ${ids.size} rule${ids.size===1?'':'s'}? Your transactions are not affected.`,()=>{
+    snapshotRulesForUndo();
     state.truthTable=state.truthTable.filter(r=>!ids.has(r.id));
     Store.save(); runTruthAudit(); renderTruthTable();
-    toast(`Deleted ${ids.size} rule${ids.size===1?'':'s'}`,'good');
+    toast(`Deleted ${ids.size} rule${ids.size===1?'':'s'}`,'good',{label:'Undo',fn:performUndo});
   });
 }
 function acceptRuleFor(txnId){
@@ -1432,10 +1435,11 @@ function acceptSuggestion(i){
   const g=(window._sugCache||[])[i]; if(!g) return;
   const catId=document.getElementById('sug_'+i).value;
   if(!catId){ toast('Pick a category first','bad'); return; }
+  snapshotRulesForUndo();
   state.truthTable.unshift({id:uid(),keyword:g.keyword,categoryId:catId,matchType:'contains'});
   const filed=applyRulesToReview();
-  Store.save(); updateBadge(); renderTruthTable();
-  toast(`Rule added — ${filed} transaction${filed===1?'':'s'} filed`,'good');
+  Store.save(); updateBadge(); auditCache=null; renderTruthTable();
+  toast(`Rule added — ${filed} transaction${filed===1?'':'s'} filed`,'good',{label:'Undo',fn:performUndo});
 }
 function dismissSuggestion(kw){
   state.settings.dismissedSuggestions=state.settings.dismissedSuggestions||[];
@@ -1479,9 +1483,10 @@ function renderTruthTable(){
 function moveRule(i,dir){
   const j=i+dir;
   if(j<0||j>=state.truthTable.length) return;
+  snapshotRulesForUndo();
   const arr=state.truthTable;
   [arr[i],arr[j]]=[arr[j],arr[i]];
-  Store.save(); renderTruthTable();
+  Store.save(); auditCache=null; renderTruthTable();
 }
 
 function openRuleModal(id, opts){
@@ -1531,13 +1536,15 @@ function saveRule(id,opts){
   const categoryId=val('r_cat')||null;
   if(!kw){ toast('Enter a keyword','bad'); return; }
   if(!categoryId){ toast('Pick a category','bad'); return; }
+  snapshotRulesForUndo();
   if(id){ Object.assign(state.truthTable.find(x=>x.id===id),{keyword:kw,categoryId}); }
   else { state.truthTable.unshift({id:uid(),keyword:kw,categoryId,matchType:'contains'}); }
   const filed=applyRulesToReview();
   Store.save(); updateBadge(); closeModal();
-  if(currentView==='truth') renderTruthTable();
+  if(currentView==='truth'){ auditCache=null; renderTruthTable(); }
   if(currentView==='transactions') renderLedger();
-  toast(`Rule saved${filed?` — ${filed} more transaction${filed===1?'':'s'} filed automatically`:''}`,'good');
+  toast(`Rule saved${filed?` — ${filed} more transaction${filed===1?'':'s'} filed automatically`:''}`,'good',
+    {label:'Undo',fn:performUndo});
   if(opts.onSaved) opts.onSaved();
 }
 
@@ -1556,8 +1563,10 @@ function applyRulesToReview(){
 function deleteRule(id){
   const r=state.truthTable.find(x=>x.id===id);
   confirmDialog('Delete rule',`Delete the rule for <b>${esc(r.keyword)}</b>?`,()=>{
+    snapshotRulesForUndo();
     state.truthTable=state.truthTable.filter(x=>x.id!==id);
-    Store.save(); renderTruthTable(); toast('Rule deleted');
+    Store.save(); auditCache=null; renderTruthTable();
+    toast('Rule deleted','',{label:'Undo',fn:performUndo});
   });
 }
 function reapplyTruth(){
@@ -1566,10 +1575,11 @@ function reapplyTruth(){
   confirmDialog('Re-apply truth table',
     `This re-checks the ${targets.length} transaction${targets.length===1?'':'s'} that are uncategorized or need review against your current rules. Manually-set categories are left untouched. Continue?`,
     ()=>{
+      snapshotRulesForUndo();
       let changed=0;
       targets.forEach(t=>{ if(t.manualCategory) return; const before=t.categoryId; autoProcess(t,{preserveManual:true}); if(t.categoryId!==before) changed++; });
-      Store.save(); updateBadge(); renderTruthTable();
-      toast(`Re-applied — ${changed} transaction${changed===1?'':'s'} updated`,'good');
+      Store.save(); updateBadge(); auditCache=null; renderTruthTable();
+      toast(`Re-applied — ${changed} transaction${changed===1?'':'s'} updated`,'good',{label:'Undo',fn:performUndo});
     });
 }
 function exportTruthCsv(){
@@ -1599,6 +1609,7 @@ function importTruthCsv(e){
   reader.readAsText(file); e.target.value='';
 }
 function applyTruthImport(rows,replace){
+  snapshotRulesForUndo();
   if(replace) state.truthTable=[];
   const existing=new Set(state.truthTable.map(r=>(r.keyword||'').toLowerCase()));
   let added=0,skipped=0;
@@ -1612,7 +1623,9 @@ function applyTruthImport(rows,replace){
   Store.save(); closeModal(); renderTruthTable();
   const filed=applyRulesToReview();
   if(filed){ Store.save(); updateBadge(); }
-  toast(`Imported ${added} rule${added===1?'':'s'}${skipped?`, skipped ${skipped} duplicate${skipped===1?'':'s'}`:''}${filed?` · ${filed} review item${filed===1?'':'s'} auto-filed`:''}`,'good');
+  auditCache=null;
+  toast(`Imported ${added} rule${added===1?'':'s'}${skipped?`, skipped ${skipped} duplicate${skipped===1?'':'s'}`:''}${filed?` · ${filed} review item${filed===1?'':'s'} auto-filed`:''}`,'good',
+    {label:'Undo',fn:performUndo});
 }
 
 /* ============================================================
@@ -3106,9 +3119,20 @@ function snapshotForUndo(ids){
 function snapshotAllForUndo(){
   undoState={ all:true, items: JSON.parse(JSON.stringify(state.transactions)) };
 }
+/* rule changes can refile hundreds of transactions at once, so snapshot
+   the rules AND every transaction before they run */
+function snapshotRulesForUndo(){
+  undoState={ full:true,
+    truthTable: JSON.parse(JSON.stringify(state.truthTable)),
+    items: JSON.parse(JSON.stringify(state.transactions)) };
+}
 function performUndo(){
   if(!undoState) return;
-  if(undoState.all){ state.transactions=undoState.items; }
+  if(undoState.full){
+    state.truthTable=undoState.truthTable;
+    state.transactions=undoState.items;
+  }
+  else if(undoState.all){ state.transactions=undoState.items; }
   else {
     const byId={}; undoState.items.forEach(t=>byId[t.id]=t);
     // restore edits in place; re-add any that were deleted
@@ -3116,10 +3140,12 @@ function performUndo(){
     const present=new Set(state.transactions.map(t=>t.id));
     undoState.items.forEach(t=>{ if(!present.has(t.id)) state.transactions.push(t); });
   }
+  const wasFull=undoState.full;
   undoState=null;
   Store.save(); updateBadge();
   if(currentView==='transactions') renderLedger();
   if(currentView==='dashboard') renderDashboard();
+  if(currentView==='truth'){ if(wasFull) auditCache=null; renderTruthTable(); }
   toast('Undone','good');
 }
 function val(id){ return document.getElementById(id).value; }
