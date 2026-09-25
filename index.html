@@ -465,7 +465,10 @@ tr:last-child td{border-bottom:none}
     <div class="card">
       <div class="card-head">
         <div><h2>Accounts</h2><div class="sub">The bank accounts and credit cards you track.</div></div>
-        <button class="btn btn-primary" onclick="openAccountModal()">+ Add account</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost" onclick="checkCardAssignments()">🔍 Check card numbers</button>
+          <button class="btn btn-primary" onclick="openAccountModal()">+ Add account</button>
+        </div>
       </div>
       <div id="acctList"></div>
     </div>
@@ -634,10 +637,16 @@ function setSync(stateName){
      adjusted set  -> the adjusted value
      otherwise     -> the raw spent amount
    ============================================================ */
+/* money other people have paid you back for this particular purchase */
+function repaidTotal(t){
+  return +((t && t.repayments || []).reduce((a,r)=>a+(Number(r.amount)||0),0)).toFixed(2);
+}
 function finalAmount(txn){
   if(txn.flags && (txn.flags.workExpense || txn.flags.lentOut)) return 0;
   if(txn.adjusted !== null && txn.adjusted !== undefined && txn.adjusted !== '') return Number(txn.adjusted);
-  return Number(txn.spent)||0;
+  const spent=Number(txn.spent)||0;
+  const repaid=repaidTotal(txn);
+  return repaid ? +(spent-repaid).toFixed(2) : spent;
 }
 
 /* helpers */
@@ -735,6 +744,7 @@ function renderDashboard(){
     .filter(t=>t.v>0).sort((a,b)=>b.v-a.v).slice(0,3);
   const reviewN=txns.filter(t=>t.flags&&t.flags.needsReview).length;
   const lentTotal=lentOutstanding(txns);
+  const lentPeople=lentByPerson().filter(p=>p.outstanding>0.005).length;
 
   wrap.innerHTML=`
     <div class="stat"><div class="k">Spent in ${thisM}</div><div class="v">${money(cur)}</div>
@@ -744,9 +754,12 @@ function renderDashboard(){
       ${tops.length?tops.map((t,i)=>`<div style="display:flex;justify-content:space-between;gap:10px;font-size:13.5px;margin-top:${i===0?'8':'4'}px">
         <span><span class="bd-swatch" style="background:${parentHex(t.p,i)}"></span>${esc(t.p)}</span><b class="tab-nums">${money(t.v)}</b></div>`).join(''):'<div class="v small">—</div>'}</div>
     ${lentTotal>0?`<div class="stat" style="cursor:pointer" role="button" tabindex="0" aria-label="View money lent out"
-      onclick="clearLedgerFilters();ledger.flag='lentOut';switchView('transactions')">
+      onclick="openLentBreakdown()">
       <div class="k">Lent out 🤝</div><div class="v" style="color:var(--accent)">${money(lentTotal)}</div>
-      <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">Owed back · tap to view →</div></div>`:''}
+      <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">${lentPeople} ${lentPeople===1?'person':'people'} · tap for details →</div></div>`:''}
+    ${lentTotal<=0 && peopleSummary().length?`<div class="stat" style="cursor:pointer" role="button" tabindex="0" onclick="openLentBreakdown()">
+      <div class="k">People 🤝</div><div class="v small">${money(peopleSummary().reduce((a,p)=>a+p.settled,0))} back</div>
+      <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">tap for details →</div></div>`:''}
     <div class="stat" ${reviewN?`style="cursor:pointer" onclick="clearLedgerFilters();ledger.needsReview=true;switchView('transactions')" role="button" tabindex="0" aria-label="Review ${reviewN} uncategorized transactions"`:''}>
       <div class="k">Needs review</div><div class="v" style="color:${reviewN?'var(--danger)':'var(--good)'}">${reviewN}</div>
       ${reviewN?`<button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="event.stopPropagation();startReviewQueue()">⚡ Review one by one</button>`:''}</div>`;
@@ -789,6 +802,81 @@ function renderAccounts(){
       </div>
     </div>`;
   }).join('');
+}
+
+/* ---- match transactions to accounts by card number -------------------
+   Imports assign a whole file to one account, so statements loaded before
+   the right account existed end up filed under the wrong name. The card
+   number on each row is the truth; this reconciles against it. */
+function cardKey(s){
+  const d=String(s||'').replace(/\D/g,'');
+  if(d.length<8) return null;
+  return d.slice(0,4)+'-'+d.slice(-4);
+}
+function cardKeyMap(){
+  const map={};
+  state.accounts.forEach(a=>(a.cardNumbers||[]).forEach(cn=>{
+    const k=cardKey(cn); if(k) map[k]=a.id;
+  }));
+  return map;
+}
+function cardAssignmentReport(){
+  const map=cardKeyMap();
+  const moves={}, unknown={};
+  let checked=0;
+  state.transactions.forEach(t=>{
+    const k=cardKey(t.cardNumber);
+    if(!k) return;
+    checked++;
+    const should=map[k];
+    if(!should){
+      if(!unknown[k]) unknown[k]={key:k, sample:t.cardNumber, count:0};
+      unknown[k].count++;
+      return;
+    }
+    if(should===t.accountId) return;
+    const mk=t.accountId+'>'+should;
+    if(!moves[mk]) moves[mk]={from:t.accountId, to:should, key:k, count:0, ids:[]};
+    moves[mk].count++; moves[mk].ids.push(t.id);
+  });
+  return {checked, moves:Object.values(moves).sort((a,b)=>b.count-a.count), unknown:Object.values(unknown)};
+}
+function checkCardAssignments(){
+  const r=cardAssignmentReport();
+  const noCard=state.transactions.filter(t=>!cardKey(t.cardNumber)).length;
+  if(!r.moves.length){
+    setModal('Card check', `<p style="line-height:1.6">Every transaction that carries a card number is already filed under the matching account. ✓</p>
+      <p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Checked ${r.checked} transaction${r.checked===1?'':'s'} with a card number.
+      ${noCard?`${noCard} have no card number and can't be checked this way.`:''}
+      ${r.unknown.length?`<br><br>⚠️ ${r.unknown.length} card number${r.unknown.length===1?'':'s'} in your data don't belong to any account: ${r.unknown.map(u=>esc(u.sample)+' ('+u.count+')').join(', ')}. Add them to an account so future checks can match them.`:''}</p>`,
+      [{label:'Close',cls:'btn-primary',fn:closeModal}]);
+    return;
+  }
+  const total=r.moves.reduce((a,m)=>a+m.count,0);
+  setModal('Move transactions to the right account', `
+    <p style="line-height:1.6"><b>${total}</b> transaction${total===1?'':'s'} carry a card number that belongs to a different account:</p>
+    <div style="margin:14px 0">
+      ${r.moves.map(m=>`<div style="display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:14px">
+        <div><b>${m.count}</b> from <b>${esc(acctName(m.from)||'(no account)')}</b> → <b>${esc(acctName(m.to))}</b>
+        <div style="font-size:12px;color:var(--ink-soft)">card ending ${esc(m.key.split('-')[1])}</div></div>
+      </div>`).join('')}
+    </div>
+    ${r.unknown.length?`<p style="font-size:12.5px;color:var(--warn)">⚠️ Also found ${r.unknown.length} card number${r.unknown.length===1?'':'s'} not on any account: ${r.unknown.map(u=>esc(u.sample)+' ('+u.count+')').join(', ')}. Those are left alone.</p>`:''}
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:8px">Only the account changes — amounts, categories and dates are untouched.${noCard?` ${noCard} transaction${noCard===1?'':'s'} have no card number and are left alone.`:''}</p>
+  `, [
+    {label:'Cancel',cls:'btn-ghost',fn:closeModal},
+    {label:`Move ${total}`,cls:'btn-primary',fn:()=>applyCardAssignments(r)}
+  ]);
+}
+function applyCardAssignments(r){
+  snapshotAllForUndo();
+  const target={};
+  r.moves.forEach(m=>m.ids.forEach(id=>target[id]=m.to));
+  let n=0;
+  state.transactions.forEach(t=>{ if(target[t.id]){ t.accountId=target[t.id]; n++; } });
+  Store.save(); closeModal(); renderAccounts();
+  if(currentView==='transactions') renderLedger();
+  toast(`Moved ${n} transaction${n===1?'':'s'}`,'good',{label:'Undo',fn:performUndo});
 }
 
 function openAccountModal(id){
@@ -1103,7 +1191,8 @@ function renderReviewCard(){
   const similar=guess?Math.max(0,guess.total-1):0;
   setModal(`Review ${reviewIdx+1} of ${reviewQueue.length}`, `
     <div style="text-align:center;padding:4px 0 14px">
-      <div style="font-family:var(--serif);font-size:20px;font-weight:600;line-height:1.3">${esc(t.description)}</div>
+      <div style="font-family:var(--serif);font-size:20px;font-weight:600;line-height:1.3">${esc(counterpartyOf(t)||t.description)}</div>
+      ${counterpartyOf(t)?`<div style="font-size:11.5px;color:var(--ink-soft);margin-top:3px">${esc(t.description)}</div>`:''}
       <div style="font-size:13px;color:var(--ink-soft);margin-top:6px">${esc(t.date)} · ${esc(acctName(t.accountId))}</div>
       <div style="font-family:var(--serif);font-size:30px;font-weight:600;margin-top:10px">${t.credit?'+'+money(t.credit):money(t.spent||0)}</div>
       ${similar?`<div style="font-size:12.5px;color:var(--accent);margin-top:8px">${similar} similar transaction${similar===1?'':'s'} in your history</div>`:''}
@@ -1140,7 +1229,112 @@ function saveReviewCard(){
    rule: it matches one store in one city. These helpers propose broader
    keywords and show how many transactions each would actually catch. */
 const PROV_STATE=/\s+(ON|QC|BC|AB|MB|SK|NS|NB|NL|PE|NT|NU|YT|NY|CA|TX|FL|WA|MI|OR|AZ|IL|MA|NV|OH|PA|GA|CO|NC|VA|TN|MN|WI|IN|MO|MD|UT|NJ|SC|AL|KY|OK|IA|KS|AR|MS|NE|NM|ID|WV|HI|ME|NH|RI|MT|DE|SD|ND|AK|VT|WY|DC)\s*$/i;
+/* ---- e-transfer counterparties ---------------------------------------
+   An e-transfer has no merchant: what matters is who is on the other end.
+   The bank puts the name after a long reference number, so pull it out and
+   treat it the way a merchant name is treated everywhere else. */
+function extractCounterparty(desc){
+  const d=(desc||'').replace(/\s+/g,' ').trim();
+  if(!/e-?transfer/i.test(d)) return '';
+  let name='';
+  const m=d.match(/\b\d{6,}\b\s*(.+)$/);           // ...105964167501 Andrew Ham
+  if(m) name=m[1];
+  if(!name){
+    const m2=d.match(/e-?transfer\s+(.+)$/i);        // ...E-TRANSFER Andrew Ham
+    if(m2) name=m2[1];
+  }
+  return name.replace(/\b(sent|received|from|to|autodeposit)\b/ig,' ')
+             .replace(/\s+/g,' ').trim();
+}
+/* a manual value always wins, so you can tag card purchases too */
+function counterpartyOf(t){
+  if(t && t.counterparty) return t.counterparty;
+  return extractCounterparty(t&&t.description);
+}
+/* money fronted for people, netted per person */
+function peopleSummary(){
+  const people={};
+  const get=n=>{ if(!people[n]) people[n]={name:n,charged:0,repaid:0,outstanding:0,count:0,settled:0,settleCount:0}; return people[n]; };
+  state.transactions.forEach(t=>{
+    // 1) whole transactions flagged as lent out
+    if(t.flags&&t.flags.lentOut){
+      const p=get(counterpartyOf(t)||'Unassigned');
+      p.charged+=Number(t.spent)||0;
+      p.repaid+=Number(t.credit)||0;
+      p.count++;
+    }
+    // 2) shares of a shared purchase that people have paid back
+    (t.repayments||[]).forEach(r=>{
+      const p=get((r.person||'').trim()||'Unassigned');
+      p.settled+=Number(r.amount)||0;
+      p.settleCount++;
+    });
+  });
+  Object.values(people).forEach(p=>{
+    p.outstanding=+(p.charged-p.repaid).toFixed(2);
+    p.settled=+p.settled.toFixed(2);
+  });
+  return Object.values(people).sort((a,b)=> b.outstanding-a.outstanding || b.settled-a.settled);
+}
+function lentByPerson(){ return peopleSummary().filter(p=>p.count>0); }
+/* everyone who has ever appeared, for autocomplete */
+function knownPeople(){
+  const set={};
+  state.transactions.forEach(t=>{
+    const w=counterpartyOf(t); if(w) set[w]=1;
+    (t.repayments||[]).forEach(r=>{ if(r.person) set[r.person]=1; });
+  });
+  return Object.keys(set).sort();
+}
+function openLentBreakdown(){
+  const people=peopleSummary();
+  if(!people.length){ toast('No shared expenses or lent money recorded yet','bad'); return; }
+  const owed=people.reduce((a,p)=>a+Math.max(0,p.outstanding),0);
+  const back=people.reduce((a,p)=>a+p.settled,0);
+  setModal('People', `
+    <div style="margin-bottom:12px;font-size:13.5px;color:var(--ink-soft)">
+      ${owed>0.005?`Still owed <b style="color:var(--ink)">${money(owed)}</b>`:''}
+      ${owed>0.005&&back>0.005?' · ':''}
+      ${back>0.005?`Paid back to you <b style="color:var(--ink)">${money(back)}</b>`:''}
+    </div>
+    ${people.map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)">
+      <div style="min-width:0">
+        <div style="font-weight:600;font-size:14.5px">${esc(p.name)}</div>
+        <div style="font-size:12px;color:var(--ink-soft)">
+          ${p.settleCount?`${money(p.settled)} paid back across ${p.settleCount} expense${p.settleCount===1?'':'s'}`:''}
+          ${p.settleCount&&p.count?' · ':''}
+          ${p.count?`${money(p.charged)} lent${p.repaid?`, ${money(p.repaid)} returned`:''}`:''}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        ${p.outstanding>0.005?`<b class="tab-nums" style="color:var(--accent)">${money(p.outstanding)} owed</b>`
+          :`<b class="tab-nums" style="color:var(--good)">settled</b>`}
+        <button class="btn btn-ghost btn-sm" onclick="viewPerson(${JSON.stringify(p.name).replace(/"/g,'&quot;')})">View</button>
+      </div>
+    </div>`).join('')}
+    <p style="font-size:12px;color:var(--ink-soft);margin-top:12px">Log each person's share on the purchase itself (open it and use “Paid back by others”). Your spending drops by what they've returned.</p>
+  `, [{label:'Close',cls:'btn-primary',fn:closeModal}]);
+}
+function viewPerson(name){
+  closeModal();
+  clearLedgerFilters();
+  ledger.person=name;
+  switchView('transactions');
+}
+
 function suggestKeywords(desc){
+  // for e-transfers the person's name is the useful keyword, not the
+  // boilerplate that precedes the reference number
+  const who=extractCounterparty(desc);
+  if(who && who.length>=3){
+    const out=[who];
+    const w=who.split(' ').filter(Boolean);
+    if(w.length>=2 && w[0].length>=4) out.push(w[0]);
+    return out;
+  }
+  return suggestKeywordsGeneric(desc);
+}
+function suggestKeywordsGeneric(desc){
   const full=(desc||'').replace(/\s+/g,' ').trim();
   let s=full.replace(FX_RE,'').trim();          // drop "452.21 MYR @ .346896"
   s=s.replace(/^[A-Za-z]{2,6}\s*\*+\s*/,'');    // SQ * / TST- / BP* processor prefixes
@@ -2227,7 +2421,7 @@ const FLAG_DEFS=[
   {key:'eTransferMethod', icon:'📱', label:'E-transfer'},
   {key:'needsReview', icon:'⚠️', label:'Needs review'},
 ];
-const ledger={ search:'', accountId:'', parent:'', sub:'', flag:'', from:'', to:'',
+const ledger={ search:'', accountId:'', parent:'', sub:'', flag:'', from:'', to:'', person:'',
   needsReview:false, sortKey:'date', sortDir:'desc', page:1, perPage:50, selected:new Set() };
 
 function acctName(id){ const a=state.accounts.find(x=>x.id===id); return a?a.name:''; }
@@ -2240,6 +2434,8 @@ function ledgerFiltered(){
   if(ledger.parent) rows=rows.filter(t=>catParent(t.categoryId)===ledger.parent);
   if(ledger.sub) rows=rows.filter(t=>t.categoryId===ledger.sub);
   if(ledger.needsReview) rows=rows.filter(t=>t.flags&&t.flags.needsReview);
+  if(ledger.person) rows=rows.filter(t=>counterpartyOf(t)===ledger.person ||
+    (t.repayments||[]).some(r=>(r.person||'').trim()===ledger.person));
   if(ledger.flag==='__credit__') rows=rows.filter(t=>Number(t.credit)>0);
   else if(ledger.flag) rows=rows.filter(t=>t.flags&&t.flags[ledger.flag]);
   if(ledger.from) rows=rows.filter(t=>(t.date||'')>=ledger.from);
@@ -2310,15 +2506,18 @@ function renderLedger(skipFilters){
     const excluded=f.isBalancing||f.isInterAccountTransfer;
     const fx=t.originalCurrencyString?`<div style="font-size:11px;color:var(--ink-soft)">${esc(t.originalCurrencyString)}</div>`:'';
     const sel=ledger.selected.has(t.id);
+    const who=counterpartyOf(t);
     return `<tr class="${f.needsReview?'review':''} ${excluded?'excluded':''}" onclick="openTxnEditor('${t.id}')">
       <td class="keep td-check" onclick="event.stopPropagation()"><input type="checkbox" ${sel?'checked':''} aria-label="Select transaction" onchange="ledgerToggleSel('${t.id}',this.checked)"></td>
       <td class="num datecell td-date" data-label="Date" title="${esc(t.date)}">${esc(t.date)}</td>
       <td class="td-acct" data-label="Account">${esc(acctName(t.accountId))}${t.cardNumber?`<div style="font-size:11px;color:var(--ink-soft)">${esc(t.cardNumber)}</div>`:''}</td>
-      <td class="td-desc" data-label="Description" style="max-width:300px">${esc(t.description)}${t.splitOf?' <span class="cat-tag excluded" title="Part of a split">✂️ split</span>':''}${fx}</td>
+      <td class="td-desc" data-label="Description" style="max-width:300px">${who
+        ? `<b>${esc(who)}</b><div style="font-size:11px;color:var(--ink-soft)">${esc(t.description)}</div>`
+        : esc(t.description)}${t.splitOf?' <span class="cat-tag excluded" title="Part of a split">✂️ split</span>':''}${fx}</td>
       <td class="num td-spent" data-label="Spent">${t.spent?money(t.spent):''}</td>
       <td class="num td-credit" data-label="Credit" style="color:var(--good)">${t.credit?money(t.credit):''}</td>
       <td class="keep td-cat" data-label="Category" onclick="event.stopPropagation()"><select class="inline-cat" aria-label="Category" onchange="setTxnCategory('${t.id}',this.value)">${categoryOptions(t.categoryId)}</select></td>
-      <td class="num td-final" data-label="Final"><b>${money(finalAmount(t))}</b>${(t.adjusted!==null&&t.adjusted!==undefined&&t.adjusted!=='')?'<div style="font-size:11px;color:var(--accent)">adj</div>':''}</td>
+      <td class="num td-final" data-label="Final"><b>${money(finalAmount(t))}</b>${(t.adjusted!==null&&t.adjusted!==undefined&&t.adjusted!=='')?'<div style="font-size:11px;color:var(--accent)">adj</div>':(repaidTotal(t)?`<div style="font-size:11px;color:var(--good)">−${money(repaidTotal(t))} back</div>`:'')}</td>
       <td class="keep td-flags" data-label="Flags" onclick="event.stopPropagation()">${FLAG_DEFS.map(fd=>`<span class="flag-toggle ${f[fd.key]?'on':''}" role="button" tabindex="0" aria-label="${fd.label}${f[fd.key]?' (on)':' (off)'}" title="${fd.label}" onclick="toggleTxnFlag('${t.id}','${fd.key}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleTxnFlag('${t.id}','${fd.key}')}">${fd.icon}</span>`).join('')}</td>
     </tr>`;
   });
@@ -2372,10 +2571,11 @@ function renderLedgerFilters(){
       <option value="__credit__" ${ledger.flag==='__credit__'?'selected':''}>💵 Has refund / credit</option>
       ${FLAG_DEFS.filter(f=>f.key!=='needsReview').map(f=>`<option value="${f.key}" ${ledger.flag===f.key?'selected':''}>${f.icon} ${f.label}</option>`).join('')}</select></div>
     <div class="fg"><label>&nbsp;</label><span class="chip ${ledger.needsReview?'on':''}" role="button" tabindex="0" onclick="ledger.needsReview=!ledger.needsReview;ledger.page=1;renderLedger()">⚠️ Needs review${reviewN?` (${reviewN})`:''}</span></div>
+    ${ledger.person?`<div class="fg"><label>&nbsp;</label><span class="chip on" role="button" tabindex="0" onclick="ledger.person='';ledger.page=1;renderLedger()">🤝 ${esc(ledger.person)} <b style="margin-left:4px">×</b></span></div>`:''}
     ${reviewN?`<div class="fg"><label>&nbsp;</label><button class="btn btn-primary btn-sm" onclick="startReviewQueue()">⚡ Review ${reviewN} one by one</button></div>`:''}
     <div class="fg"><label>&nbsp;</label><button class="btn btn-ghost btn-sm" onclick="clearLedgerFilters()">Clear</button></div>`;
 }
-function clearLedgerFilters(){ Object.assign(ledger,{search:'',accountId:'',parent:'',sub:'',flag:'',from:'',to:'',needsReview:false,page:1}); renderLedger(); }
+function clearLedgerFilters(){ Object.assign(ledger,{search:'',accountId:'',parent:'',sub:'',flag:'',from:'',to:'',needsReview:false,person:'',page:1}); renderLedger(); }
 function ledgerSort(k){ if(ledger.sortKey===k){ ledger.sortDir=ledger.sortDir==='asc'?'desc':'asc'; } else { ledger.sortKey=k; ledger.sortDir='asc'; } renderLedger(); }
 function ledgerPage(d){ ledger.page+=d; renderLedger(); }
 
@@ -2428,7 +2628,19 @@ function openTxnEditor(id){
     <div class="field"><label>Category</label><select id="e_cat">${categoryOptions(t.categoryId)}</select></div>
     <div class="field"><label>Adjusted amount — overrides the final amount (e.g. your half of a split). Leave blank to use Spent.</label>
       <input id="e_adj" type="number" step="0.01" placeholder="blank = use ${money(t.spent)}" value="${(t.adjusted!==null&&t.adjusted!==undefined)?t.adjusted:''}"></div>
+    <div class="field"><label>Person — who this was with (for 🤝 lent money)</label>
+      <input id="e_person" placeholder="${esc(extractCounterparty(t.description)||'e.g. Andrew Ham')}" value="${esc(t.counterparty||'')}">
+      ${extractCounterparty(t.description)?`<div style="font-size:12px;color:var(--ink-soft);margin-top:4px">Detected from the description: <b>${esc(extractCounterparty(t.description))}</b> — leave blank to use it.</div>`:''}</div>
     <div class="field"><label>Notes</label><textarea id="e_notes" rows="2">${esc(t.notes||'')}</textarea></div>
+    <div style="border:1px solid var(--line);border-radius:11px;padding:13px;margin-bottom:16px">
+      <div style="font-weight:600;font-size:13.5px;margin-bottom:3px">Paid back by others</div>
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:10px">Log each person's share as it comes in. What's left is what you actually spent.</div>
+      <div id="e_repayments"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addRepaymentRow()">+ Add a person</button>
+        <div id="e_repaySummary" style="font-size:13px"></div>
+      </div>
+    </div>
     ${t.splitOf?`<div style="padding:10px 12px;border-radius:9px;background:rgba(156,67,34,.07);border:1px solid var(--accent-soft);font-size:12.5px;margin-bottom:16px">
         ✂️ Part of a split transaction.
         <button type="button" class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="mergeSplit('${t.id}')">Merge back together</button></div>`
@@ -2441,6 +2653,40 @@ function openTxnEditor(id){
     {label:'Cancel', cls:'btn-ghost', fn:closeModal},
     {label:'Save', cls:'btn-primary', fn:()=>saveTxnEdit(id)}
   ]);
+  editRepayments=JSON.parse(JSON.stringify(t.repayments||[]));
+  editRepayBasis=Number(t.spent)||0;
+  renderRepayments(); updateRepaySummary();
+}
+let editRepayments=[], editRepayBasis=0;
+function renderRepayments(){
+  const box=document.getElementById('e_repayments'); if(!box) return;
+  const names=knownPeople();
+  box.innerHTML = editRepayments.length ? editRepayments.map((r,i)=>`
+    <div class="row" style="align-items:flex-end;margin-bottom:6px">
+      <div class="field" style="flex:1;min-width:120px;margin:0">
+        <input list="peopleList" placeholder="Name" value="${esc(r.person||'')}" aria-label="Person ${i+1}"
+          oninput="editRepayments[${i}].person=this.value">
+      </div>
+      <div class="field" style="flex:0 0 110px;margin:0">
+        <input type="number" step="0.01" placeholder="0.00" value="${r.amount||''}" aria-label="Amount from person ${i+1}"
+          oninput="editRepayments[${i}].amount=parseFloat(this.value)||0;updateRepaySummary()">
+      </div>
+      <button type="button" class="icon-btn" aria-label="Remove" style="margin-bottom:9px"
+        onclick="editRepayments.splice(${i},1);renderRepayments();updateRepaySummary()">🗑</button>
+    </div>`).join('') + `<datalist id="peopleList">${names.map(n=>`<option value="${esc(n)}">`).join('')}</datalist>`
+    : `<div style="font-size:12.5px;color:var(--ink-soft)">Nobody has paid you back for this yet.</div>`;
+}
+function addRepaymentRow(){ editRepayments.push({person:'',amount:0}); renderRepayments(); updateRepaySummary(); }
+function updateRepaySummary(){
+  const el=document.getElementById('e_repaySummary'); if(!el) return;
+  const spentEl=document.getElementById('e_spent');
+  const spent=spentEl?(parseFloat(spentEl.value)||0):editRepayBasis;
+  const back=editRepayments.reduce((a,r)=>a+(Number(r.amount)||0),0);
+  const mine=+(spent-back).toFixed(2);
+  el.innerHTML = back
+    ? `You paid ${money(spent)} · back ${money(back)} · <b>your share ${money(mine)}</b>`
+      + (mine<-0.005?` <span style="color:var(--warn)">(more back than you paid)</span>`:'')
+    : `<span style="color:var(--ink-soft)">You paid ${money(spent)}</span>`;
 }
 function saveTxnEdit(id){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
@@ -2450,6 +2696,12 @@ function saveTxnEdit(id){
   t.categoryId=val('e_cat')||null;
   const adj=val('e_adj').trim(); t.adjusted = adj===''?null:toNum(adj);
   t.notes=val('e_notes').trim();
+  const person=val('e_person').trim();
+  if(person) t.counterparty=person; else delete t.counterparty;
+  const reps=editRepayments
+    .map(r=>({person:(r.person||'').trim(), amount:+(Number(r.amount)||0).toFixed(2)}))
+    .filter(r=>r.amount>0);
+  if(reps.length) t.repayments=reps; else delete t.repayments;
   t.flags=t.flags||{};
   FLAG_DEFS.forEach(fd=>{ t.flags[fd.key]=document.getElementById('e_'+fd.key).checked; });
   t.originalCurrencyString=detectForeign(t.description);
