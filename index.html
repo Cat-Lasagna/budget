@@ -424,6 +424,13 @@ tr:last-child td{border-bottom:none}
     <div id="chartsArea"></div>
   </section>
 
+  <!-- PEOPLE -->
+  <section class="panel" data-view="people">
+    <div class="page-head"><h1>People</h1><p>Who owes you, and what's already been paid back.</p></div>
+    <div class="stats" id="peopleStats"></div>
+    <div class="card"><div id="peopleList"></div></div>
+  </section>
+
   <!-- IMPORT -->
   <section class="panel" data-view="import">
     <div class="page-head"><h1>Import</h1><p>Load transactions from your bank's CSV files.</p></div>
@@ -457,6 +464,7 @@ tr:last-child td{border-bottom:none}
   <section class="panel" data-view="settings">
     <div class="page-head"><h1>Settings</h1><p>Manage your accounts, categories, and backups.</p></div>
 
+    <div id="dataCheck"></div>
     <div class="card">
       <div class="card-head"><div><h2>Cloud Sync</h2><div class="sub">Keep your phone and computer in sync through Google Drive.</div></div></div>
       <div id="syncCard"></div>
@@ -502,6 +510,11 @@ tr:last-child td{border-bottom:none}
         <label class="checkline" style="margin:10px 0 0"><input type="checkbox" id="rulePromptChk" style="width:auto" onchange="toggleRulePrompt(this.checked)">
           <span>Offer to make a rule when I categorize something by hand<br><span style="font-size:12px;color:var(--ink-soft);font-weight:400">Only appears for transactions no rule covers yet.</span></span></label>
         <div id="dataSizeInfo" style="margin-top:14px;font-size:12.5px;color:var(--ink-soft)"></div>
+      </div>
+      <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
+        <div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;color:var(--ink-soft)">Data check</div>
+        <div class="sub" style="margin-bottom:10px">Find duplicates and months where nothing was imported.</div>
+        <button class="btn btn-ghost" onclick="runDataCheck()">🩺 Check my data</button>
       </div>
       <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
         <div style="font-size:13px;font-weight:700;color:var(--danger);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Danger zone</div>
@@ -641,6 +654,15 @@ function setSync(stateName){
 function repaidTotal(t){
   return +((t && t.repayments || []).reduce((a,r)=>a+(Number(r.amount)||0),0)).toFixed(2);
 }
+/* what this row contributes to the numbers you see — finalAmount is the
+   cost side, this also accounts for a credit being netted off */
+function displayAmount(t){
+  const c=catById(t.categoryId);
+  if(c && (c.isIncome||c.isInvestment)) return (Number(t.credit)||0)||finalAmount(t);
+  const f=t.flags||{};
+  if(f.isBalancing||f.isInterAccountTransfer) return finalAmount(t);
+  return +(finalAmount(t)-creditOffset(t)).toFixed(2);
+}
 function finalAmount(txn){
   if(txn.flags && (txn.flags.workExpense || txn.flags.lentOut)) return 0;
   if(txn.adjusted !== null && txn.adjusted !== undefined && txn.adjusted !== '') return Number(txn.adjusted);
@@ -672,6 +694,7 @@ const VIEWS = [
   {id:'transactions', label:'Transactions', icon:'≡', badge:true},
   {id:'breakdown', label:'Breakdown', icon:'▦'},
   {id:'charts', label:'Charts', icon:'▲'},
+  {id:'people', label:'People', icon:'◈'},
   {id:'import', label:'Import', icon:'↓'},
   {id:'truth', label:'Truth Table', icon:'✦'},
   {id:'settings', label:'Settings', icon:'⚙'},
@@ -703,6 +726,7 @@ function switchView(id){
   if(id==='import') renderImportStart();
   if(id==='transactions') renderLedger();
   if(id==='breakdown') renderBreakdown();
+  if(id==='people') renderPeople();
   if(id==='charts') renderCharts();
 }
 function updateBadge(){
@@ -754,10 +778,10 @@ function renderDashboard(){
       ${tops.length?tops.map((t,i)=>`<div style="display:flex;justify-content:space-between;gap:10px;font-size:13.5px;margin-top:${i===0?'8':'4'}px">
         <span><span class="bd-swatch" style="background:${parentHex(t.p,i)}"></span>${esc(t.p)}</span><b class="tab-nums">${money(t.v)}</b></div>`).join(''):'<div class="v small">—</div>'}</div>
     ${lentTotal>0?`<div class="stat" style="cursor:pointer" role="button" tabindex="0" aria-label="View money lent out"
-      onclick="openLentBreakdown()">
+      onclick="switchView('people')">
       <div class="k">Lent out 🤝</div><div class="v" style="color:var(--accent)">${money(lentTotal)}</div>
       <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">${lentPeople} ${lentPeople===1?'person':'people'} · tap for details →</div></div>`:''}
-    ${lentTotal<=0 && peopleSummary().length?`<div class="stat" style="cursor:pointer" role="button" tabindex="0" onclick="openLentBreakdown()">
+    ${lentTotal<=0 && peopleSummary().length?`<div class="stat" style="cursor:pointer" role="button" tabindex="0" onclick="switchView('people')">
       <div class="k">People 🤝</div><div class="v small">${money(peopleSummary().reduce((a,p)=>a+p.settled,0))} back</div>
       <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">tap for details →</div></div>`:''}
     <div class="stat" ${reviewN?`style="cursor:pointer" onclick="clearLedgerFilters();ledger.needsReview=true;switchView('transactions')" role="button" tabindex="0" aria-label="Review ${reviewN} uncategorized transactions"`:''}>
@@ -1031,6 +1055,137 @@ function deleteCategory(id){
 /* ============================================================
    7. DATA EXPORT / IMPORT
    ============================================================ */
+/* ---- data health ------------------------------------------------------
+   Scans the whole ledger for the things that go wrong with imported data:
+   the same purchase loaded twice, and months where nothing was imported. */
+function dupKey(t){
+  return [t.accountId,(t.date||''),(t.description||'').toLowerCase().trim(),
+          Number(t.spent)||0, Number(t.credit)||0].join('|');
+}
+function dataHealth(){
+  const txns=state.transactions;
+  const issues={badDate:[],noAccount:[],zero:[]};
+  const groups={};
+  const accountIds=new Set(state.accounts.map(a=>a.id));
+  txns.forEach(t=>{
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(t.date||'')) issues.badDate.push(t);
+    if(!t.accountId || !accountIds.has(t.accountId)) issues.noAccount.push(t);
+    if(!(Number(t.spent)||0) && !(Number(t.credit)||0)) issues.zero.push(t);
+    if(t.splitOf) return;                     // split parts are meant to repeat
+    const k=dupKey(t);
+    (groups[k]=groups[k]||[]).push(t);
+  });
+  const exact=Object.values(groups).filter(g=>g.length>1)
+    .sort((a,b)=>(b[0].date||'').localeCompare(a[0].date||''));
+
+  // same purchase, same amount, a few days apart (posting-date differences)
+  const near=[];
+  const byDesc={};
+  txns.forEach(t=>{
+    if(t.splitOf) return;
+    const k=[t.accountId,(t.description||'').toLowerCase().trim(),Number(t.spent)||0,Number(t.credit)||0].join('|');
+    (byDesc[k]=byDesc[k]||[]).push(t);
+  });
+  Object.values(byDesc).forEach(g=>{
+    if(g.length<2) return;
+    const sorted=g.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    for(let i=1;i<sorted.length;i++){
+      const d1=sorted[i-1].date, d2=sorted[i].date;
+      if(d1===d2) continue;                   // already caught as exact
+      const days=Math.round((Date.parse(d2+'T00:00:00')-Date.parse(d1+'T00:00:00'))/86400000);
+      if(days>0 && days<=4) near.push([sorted[i-1],sorted[i],days]);
+    }
+  });
+
+  // month-by-month coverage per account
+  const months=[...new Set(txns.map(t=>(t.date||'').slice(0,7)).filter(m=>/^\d{4}-\d{2}$/.test(m)))].sort();
+  const span = months.length ? monthsBetween(months[0],months[months.length-1]) : [];
+  const grid={};
+  state.accounts.forEach(a=>{ grid[a.id]={}; span.forEach(m=>grid[a.id][m]=0); });
+  txns.forEach(t=>{
+    const m=(t.date||'').slice(0,7);
+    if(grid[t.accountId] && m in grid[t.accountId]) grid[t.accountId][m]++;
+  });
+  return {exact, near, issues, span, grid,
+    dupTotal: exact.reduce((a,g)=>a+(g.length-1),0)};
+}
+
+let healthCache=null;
+function runDataCheck(){ healthCache=dataHealth(); renderDataCheck(); }
+function renderDataCheck(){
+  const el=document.getElementById('dataCheck'); if(!el) return;
+  if(!healthCache){ el.innerHTML=''; return; }
+  const h=healthCache;
+  const acctRow=(a)=>{
+    const counts=h.span.map(m=>h.grid[a.id][m]||0);
+    const max=Math.max(1,...counts);
+    return `<tr><td style="white-space:nowrap;font-weight:600">${esc(a.name)}</td>
+      ${h.span.map((m,i)=>{
+        const n=counts[i];
+        const bg = n===0 ? 'rgba(168,54,43,.16)' : `rgba(63,111,74,${(0.12+0.5*(n/max)).toFixed(2)})`;
+        return `<td title="${m}: ${n} transaction${n===1?'':'s'}" style="background:${bg};text-align:center;font-size:11px;padding:6px 4px">${n||''}</td>`;
+      }).join('')}</tr>`;
+  };
+  el.innerHTML=`
+    <div class="card">
+      <div class="card-head"><div><h2>Coverage by month</h2>
+        <div class="sub">How many transactions each account has per month. <b style="color:var(--danger)">Red</b> means nothing was imported — a likely gap.</div></div></div>
+      ${h.span.length?`<div style="overflow-x:auto"><table style="min-width:100%;border-collapse:collapse">
+        <thead><tr><th></th>${h.span.map(m=>`<th style="font-size:10px;padding:4px 3px;white-space:nowrap">${m.slice(2)}</th>`).join('')}</tr></thead>
+        <tbody>${state.accounts.map(acctRow).join('')}</tbody></table></div>`
+        :'<p style="color:var(--ink-soft)">No dated transactions yet.</p>'}
+    </div>
+
+    ${h.exact.length?`<div class="card">
+      <div class="card-head"><div><h2>Exact duplicates <span style="font-weight:400;color:var(--ink-soft)">(${h.dupTotal} extra ${h.dupTotal===1?'copy':'copies'})</span></h2>
+        <div class="sub">Same account, date, description and amount. Usually from importing overlapping statements — but two identical purchases on one day are real, so check before removing.</div></div>
+        <button class="btn btn-danger btn-sm" onclick="removeDuplicateCopies()">Remove extra copies</button></div>
+      ${h.exact.slice(0,40).map(g=>`<div class="acct-item" style="flex-wrap:wrap">
+        <div class="meta" style="min-width:0;flex:1">
+          <div class="nm">${esc(g[0].description)}</div>
+          <div class="det">${esc(g[0].date)} · ${money(g[0].spent||g[0].credit)} · ${esc(acctName(g[0].accountId))} · <b>${g.length} copies</b></div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="clearLedgerFilters();ledger.search=${JSON.stringify(g[0].description).replace(/"/g,'&quot;')};switchView('transactions')">View</button>
+      </div>`).join('')}
+      ${h.exact.length>40?`<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Showing 40 of ${h.exact.length} groups.</p>`:''}
+    </div>`:`<div class="card"><div class="empty" style="padding:24px"><div class="big">✅</div><h3>No exact duplicates</h3></div></div>`}
+
+    ${h.near.length?`<div class="card">
+      <div class="card-head"><div><h2>Possible duplicates <span style="font-weight:400;color:var(--ink-soft)">(${h.near.length})</span></h2>
+        <div class="sub">Identical amount and description a few days apart — often the same purchase imported with a transaction date once and a posting date another time.</div></div></div>
+      ${h.near.slice(0,25).map(([a,b,d])=>`<div class="acct-item" style="flex-wrap:wrap">
+        <div class="meta" style="min-width:0;flex:1"><div class="nm">${esc(a.description)}</div>
+          <div class="det">${esc(a.date)} and ${esc(b.date)} (${d} day${d===1?'':'s'} apart) · ${money(a.spent||a.credit)}</div></div>
+        <button class="btn btn-ghost btn-sm" onclick="clearLedgerFilters();ledger.search=${JSON.stringify(a.description).replace(/"/g,'&quot;')};switchView('transactions')">View</button>
+      </div>`).join('')}
+      ${h.near.length>25?`<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Showing 25 of ${h.near.length}.</p>`:''}
+    </div>`:''}
+
+    ${(h.issues.badDate.length||h.issues.noAccount.length||h.issues.zero.length)?`<div class="card">
+      <div class="card-head"><div><h2>Other issues</h2><div class="sub">Rows that will behave oddly in reports.</div></div></div>
+      ${h.issues.badDate.length?`<div class="acct-item"><div class="meta"><div class="nm">${h.issues.badDate.length} with an unusable date</div>
+        <div class="det">They won't appear in any month, so they're missing from the breakdown and charts.</div></div></div>`:''}
+      ${h.issues.noAccount.length?`<div class="acct-item"><div class="meta"><div class="nm">${h.issues.noAccount.length} not linked to an account</div>
+        <div class="det">Excluded from every account-filtered view.</div></div></div>`:''}
+      ${h.issues.zero.length?`<div class="acct-item"><div class="meta"><div class="nm">${h.issues.zero.length} with no amount</div>
+        <div class="det">Zero on both sides — usually a parsing slip.</div></div></div>`:''}
+    </div>`:''}`;
+}
+function removeDuplicateCopies(){
+  const h=healthCache; if(!h||!h.exact.length) return;
+  const ids=new Set();
+  h.exact.forEach(g=>g.slice(1).forEach(t=>ids.add(t.id)));   // keep the first of each group
+  confirmDialog('Remove duplicate copies',
+    `Delete ${ids.size} extra ${ids.size===1?'copy':'copies'}, keeping one of each? Genuine repeat purchases on the same day would also be removed, so check the list first.`,
+    ()=>{
+      snapshotAllForUndo();
+      state.transactions=state.transactions.filter(t=>!ids.has(t.id));
+      Store.save(); updateBadge(); runDataCheck();
+      if(currentView==='transactions') renderLedger();
+      toast(`Removed ${ids.size} duplicate${ids.size===1?'':'s'}`,'good',{label:'Undo',fn:performUndo});
+    });
+}
+
 function renderPrefs(){
   const chk=document.getElementById('netCreditsChk');
   if(chk) chk.checked=!!(state.settings&&state.settings.netCredits);
@@ -1244,6 +1399,7 @@ function extractCounterparty(desc){
     if(m2) name=m2[1];
   }
   return name.replace(/\b(sent|received|from|to|autodeposit)\b/ig,' ')
+             .replace(/^[\d\s#*-]+/,'')          // any leftover reference digits
              .replace(/\s+/g,' ').trim();
 }
 /* a manual value always wins, so you can tag card purchases too */
@@ -1315,6 +1471,41 @@ function openLentBreakdown(){
     <p style="font-size:12px;color:var(--ink-soft);margin-top:12px">Log each person's share on the purchase itself (open it and use “Paid back by others”). Your spending drops by what they've returned.</p>
   `, [{label:'Close',cls:'btn-primary',fn:closeModal}]);
 }
+function renderPeople(){
+  const people=peopleSummary();
+  const stats=document.getElementById('peopleStats');
+  const list=document.getElementById('peopleList');
+  if(!people.length){
+    stats.innerHTML='';
+    list.innerHTML=`<div class="empty"><div class="big">🤝</div><h3>Nobody tracked yet</h3>
+      <p>Two ways to record money between you and other people:<br>
+      open a shared purchase and use <b>"Paid back by others"</b>, or flag a whole transaction <b>🤝 Lent</b>.</p></div>`;
+    return;
+  }
+  const owed=people.reduce((a,p)=>a+Math.max(0,p.outstanding),0);
+  const back=people.reduce((a,p)=>a+p.settled,0);
+  const open=people.filter(p=>p.outstanding>0.005).length;
+  stats.innerHTML=`
+    <div class="stat"><div class="k">Still owed to you</div><div class="v" style="color:${owed>0.005?'var(--accent)':'var(--good)'}">${money(owed)}</div>
+      <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">${open} open ${open===1?'balance':'balances'}</div></div>
+    <div class="stat"><div class="k">Paid back to you</div><div class="v" style="color:var(--good)">${money(back)}</div>
+      <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">across all shared expenses</div></div>
+    <div class="stat"><div class="k">People</div><div class="v">${people.length}</div></div>`;
+  list.innerHTML=`<table><thead><tr>
+      <th>Person</th><th class="num">Paid back</th><th class="num">Still owed</th><th></th>
+    </tr></thead><tbody>
+    ${people.map(p=>`<tr>
+      <td><b>${esc(p.name)}</b>
+        <div style="font-size:12px;color:var(--ink-soft)">
+          ${p.settleCount?`${p.settleCount} shared expense${p.settleCount===1?'':'s'}`:''}${p.settleCount&&p.count?' · ':''}${p.count?`${p.count} lent transaction${p.count===1?'':'s'}`:''}</div></td>
+      <td class="num" style="color:${p.settled>0.005?'var(--good)':'var(--ink-soft)'}">${p.settled>0.005?money(p.settled):'—'}</td>
+      <td class="num"><b style="color:${p.outstanding>0.005?'var(--accent)':'var(--good)'}">${p.outstanding>0.005?money(p.outstanding):'settled'}</b></td>
+      <td style="text-align:right"><button class="btn btn-ghost btn-sm" onclick="viewPerson(${JSON.stringify(p.name).replace(/"/g,'&quot;')})">View</button></td>
+    </tr>`).join('')}
+    </tbody></table>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:14px">"Paid back" comes from shares logged on a shared purchase. "Still owed" comes from transactions flagged 🤝 Lent that haven't been returned.</p>`;
+}
+
 function viewPerson(name){
   closeModal();
   clearLedgerFilters();
@@ -2299,6 +2490,10 @@ function buildPreview(){
       if(ai>=0){ let a=toNum(cols[ai]); if(pf.flipSigns) a=-a; if(a>=0) spent=a; else credit=-a; }
       else { spent = si>=0?toNum(cols[si]):0; credit = ci>=0?toNum(cols[ci]):0; }
       const cardNumber = cardi>=0 ? (cols[cardi]||'').trim() : '';
+      // some statements record money back as a negative debit — store it
+      // the same way as a credit so everything downstream behaves alike
+      if(spent<0){ credit+=-spent; spent=0; }
+      if(credit<0){ spent+=-credit; credit=0; }
       if(!date && !description) return;
       const key=importKey(date,description,spent,credit);
       const used=seenInBatch[key]||0;
@@ -2436,7 +2631,9 @@ function ledgerFiltered(){
   if(ledger.needsReview) rows=rows.filter(t=>t.flags&&t.flags.needsReview);
   if(ledger.person) rows=rows.filter(t=>counterpartyOf(t)===ledger.person ||
     (t.repayments||[]).some(r=>(r.person||'').trim()===ledger.person));
-  if(ledger.flag==='__credit__') rows=rows.filter(t=>Number(t.credit)>0);
+  if(ledger.flag==='__credit__') rows=rows.filter(t=>Number(t.credit)>0 || Number(t.spent)<0);
+  else if(ledger.flag==='__no_etransfer__') rows=rows.filter(t=>!(t.flags&&t.flags.eTransferMethod));
+  else if(ledger.flag==='__shared__') rows=rows.filter(t=>repaidTotal(t)>0);
   else if(ledger.flag) rows=rows.filter(t=>t.flags&&t.flags[ledger.flag]);
   if(ledger.from) rows=rows.filter(t=>(t.date||'')>=ledger.from);
   if(ledger.to) rows=rows.filter(t=>(t.date||'')<=ledger.to);
@@ -2452,7 +2649,7 @@ function ledgerSorted(rows){
       case 'spent': return Number(t.spent)||0;
       case 'credit': return Number(t.credit)||0;
       case 'category': return (catName(t.categoryId)||'').toLowerCase();
-      case 'final': return finalAmount(t);
+      case 'final': return displayAmount(t);
       default: return t[k];
     }
   };
@@ -2517,7 +2714,7 @@ function renderLedger(skipFilters){
       <td class="num td-spent" data-label="Spent">${t.spent?money(t.spent):''}</td>
       <td class="num td-credit" data-label="Credit" style="color:var(--good)">${t.credit?money(t.credit):''}</td>
       <td class="keep td-cat" data-label="Category" onclick="event.stopPropagation()"><select class="inline-cat" aria-label="Category" onchange="setTxnCategory('${t.id}',this.value)">${categoryOptions(t.categoryId)}</select></td>
-      <td class="num td-final" data-label="Final"><b>${money(finalAmount(t))}</b>${(t.adjusted!==null&&t.adjusted!==undefined&&t.adjusted!=='')?'<div style="font-size:11px;color:var(--accent)">adj</div>':(repaidTotal(t)?`<div style="font-size:11px;color:var(--good)">−${money(repaidTotal(t))} back</div>`:'')}</td>
+      <td class="num td-final" data-label="Final"><b${displayAmount(t)<-0.005?' style="color:var(--good)"':''}>${money(displayAmount(t))}</b>${(t.adjusted!==null&&t.adjusted!==undefined&&t.adjusted!=='')?'<div style="font-size:11px;color:var(--accent)">adj</div>':(repaidTotal(t)?`<div style="font-size:11px;color:var(--good)">−${money(repaidTotal(t))} back</div>`:'')}</td>
       <td class="keep td-flags" data-label="Flags" onclick="event.stopPropagation()">${FLAG_DEFS.map(fd=>`<span class="flag-toggle ${f[fd.key]?'on':''}" role="button" tabindex="0" aria-label="${fd.label}${f[fd.key]?' (on)':' (off)'}" title="${fd.label}" onclick="toggleTxnFlag('${t.id}','${fd.key}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleTxnFlag('${t.id}','${fd.key}')}">${fd.icon}</span>`).join('')}</td>
     </tr>`;
   });
@@ -2568,7 +2765,9 @@ function renderLedgerFilters(){
     <div class="fg"><label>To</label><input type="date" value="${ledger.to}" onchange="ledger.to=this.value;ledger.page=1;renderLedger()"></div>
     <div class="fg"><label>Flag</label><select aria-label="Filter by flag" onchange="ledger.flag=this.value;ledger.page=1;renderLedger()">
       <option value="">All</option>
+      <option value="__no_etransfer__" ${ledger.flag==='__no_etransfer__'?'selected':''}>🚫 Hide e-transfers</option>
       <option value="__credit__" ${ledger.flag==='__credit__'?'selected':''}>💵 Has refund / credit</option>
+      <option value="__shared__" ${ledger.flag==='__shared__'?'selected':''}>🤝 Shared (partly paid back)</option>
       ${FLAG_DEFS.filter(f=>f.key!=='needsReview').map(f=>`<option value="${f.key}" ${ledger.flag===f.key?'selected':''}>${f.icon} ${f.label}</option>`).join('')}</select></div>
     <div class="fg"><label>&nbsp;</label><span class="chip ${ledger.needsReview?'on':''}" role="button" tabindex="0" onclick="ledger.needsReview=!ledger.needsReview;ledger.page=1;renderLedger()">⚠️ Needs review${reviewN?` (${reviewN})`:''}</span></div>
     ${ledger.person?`<div class="fg"><label>&nbsp;</label><span class="chip on" role="button" tabindex="0" onclick="ledger.person='';ledger.page=1;renderLedger()">🤝 ${esc(ledger.person)} <b style="margin-left:4px">×</b></span></div>`:''}
@@ -2692,7 +2891,10 @@ function saveTxnEdit(id){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
   const wasUncategorized=!t.categoryId;
   t.date=val('e_date'); t.accountId=val('e_acct'); t.description=val('e_desc');
-  t.spent=toNum(val('e_spent')); t.credit=toNum(val('e_credit'));
+  let sp=toNum(val('e_spent')), cr=toNum(val('e_credit'));
+  if(sp<0){ cr+=-sp; sp=0; }          // a negative debit is a credit
+  if(cr<0){ sp+=-cr; cr=0; }
+  t.spent=sp; t.credit=cr;
   t.categoryId=val('e_cat')||null;
   const adj=val('e_adj').trim(); t.adjusted = adj===''?null:toNum(adj);
   t.notes=val('e_notes').trim();
@@ -2953,7 +3155,7 @@ function unnettedCredits(from,to,accountIds){
     if(!months.has((t.date||'').slice(0,7))) return;
     const f=t.flags||{};
     if(f.isBalancing||f.isInterAccountTransfer||f.workExpense||f.lentOut) return;
-    if(!(Number(t.credit)>0)) return;
+    if(!(Number(t.credit)>0 || Number(t.spent)<0)) return;
     const c=catById(t.categoryId);
     if(c && (c.isIncome||c.isInvestment||!c.countsTowardSpending)) return;
     if(t.adjusted!==null && t.adjusted!==undefined && t.adjusted!=='') return;
