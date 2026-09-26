@@ -1410,16 +1410,25 @@ function counterpartyOf(t){
 /* money fronted for people, netted per person */
 function peopleSummary(){
   const people={};
-  const get=n=>{ if(!people[n]) people[n]={name:n,charged:0,repaid:0,outstanding:0,count:0,settled:0,settleCount:0}; return people[n]; };
+  const get=n=>{ if(!people[n]) people[n]={name:n,charged:0,repaid:0,outstanding:0,count:0,
+    settled:0,settleCount:0,sent:0,received:0,txCount:0,net:0,ids:[]}; return people[n]; };
   state.transactions.forEach(t=>{
-    // 1) whole transactions flagged as lent out
+    const who=counterpartyOf(t);
+    // 1) every transaction tied to a person — e-transfers both ways
+    if(who){
+      const p=get(who);
+      p.sent+=Number(t.spent)||0;
+      p.received+=Number(t.credit)||0;
+      p.txCount++; p.ids.push(t.id);
+    }
+    // 2) whole transactions flagged as lent out
     if(t.flags&&t.flags.lentOut){
-      const p=get(counterpartyOf(t)||'Unassigned');
+      const p=get(who||'Unassigned');
       p.charged+=Number(t.spent)||0;
       p.repaid+=Number(t.credit)||0;
       p.count++;
     }
-    // 2) shares of a shared purchase that people have paid back
+    // 3) shares of a shared purchase people have paid back
     (t.repayments||[]).forEach(r=>{
       const p=get((r.person||'').trim()||'Unassigned');
       p.settled+=Number(r.amount)||0;
@@ -1429,8 +1438,11 @@ function peopleSummary(){
   Object.values(people).forEach(p=>{
     p.outstanding=+(p.charged-p.repaid).toFixed(2);
     p.settled=+p.settled.toFixed(2);
+    p.sent=+p.sent.toFixed(2); p.received=+p.received.toFixed(2);
+    p.net=+(p.sent-p.received).toFixed(2);
   });
-  return Object.values(people).sort((a,b)=> b.outstanding-a.outstanding || b.settled-a.settled);
+  return Object.values(people).sort((a,b)=>
+    b.outstanding-a.outstanding || Math.abs(b.net)-Math.abs(a.net) || b.txCount-a.txCount);
 }
 function lentByPerson(){ return peopleSummary().filter(p=>p.count>0); }
 /* everyone who has ever appeared, for autocomplete */
@@ -1478,8 +1490,8 @@ function renderPeople(){
   if(!people.length){
     stats.innerHTML='';
     list.innerHTML=`<div class="empty"><div class="big">🤝</div><h3>Nobody tracked yet</h3>
-      <p>Two ways to record money between you and other people:<br>
-      open a shared purchase and use <b>"Paid back by others"</b>, or flag a whole transaction <b>🤝 Lent</b>.</p></div>`;
+      <p>People appear here automatically from named e-transfers.<br>
+      You can also log shares on a shared purchase, or set the <b>Person</b> field on any transaction.</p></div>`;
     return;
   }
   const owed=people.reduce((a,p)=>a+Math.max(0,p.outstanding),0);
@@ -1490,20 +1502,27 @@ function renderPeople(){
       <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">${open} open ${open===1?'balance':'balances'}</div></div>
     <div class="stat"><div class="k">Paid back to you</div><div class="v" style="color:var(--good)">${money(back)}</div>
       <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">across all shared expenses</div></div>
-    <div class="stat"><div class="k">People</div><div class="v">${people.length}</div></div>`;
-  list.innerHTML=`<table><thead><tr>
-      <th>Person</th><th class="num">Paid back</th><th class="num">Still owed</th><th></th>
+    <div class="stat"><div class="k">People</div><div class="v">${people.length}</div>
+      <div style="font-size:12.5px;margin-top:4px;color:var(--ink-soft)">${people.reduce((a,p)=>a+p.txCount,0)} transfers tracked</div></div>`;
+  list.innerHTML=`<div style="overflow-x:auto"><table><thead><tr>
+      <th>Person</th><th class="num">You sent</th><th class="num">They sent</th><th class="num">Net</th><th class="num">Owed / paid back</th><th></th>
     </tr></thead><tbody>
     ${people.map(p=>`<tr>
       <td><b>${esc(p.name)}</b>
-        <div style="font-size:12px;color:var(--ink-soft)">
-          ${p.settleCount?`${p.settleCount} shared expense${p.settleCount===1?'':'s'}`:''}${p.settleCount&&p.count?' · ':''}${p.count?`${p.count} lent transaction${p.count===1?'':'s'}`:''}</div></td>
-      <td class="num" style="color:${p.settled>0.005?'var(--good)':'var(--ink-soft)'}">${p.settled>0.005?money(p.settled):'—'}</td>
-      <td class="num"><b style="color:${p.outstanding>0.005?'var(--accent)':'var(--good)'}">${p.outstanding>0.005?money(p.outstanding):'settled'}</b></td>
+        <div style="font-size:12px;color:var(--ink-soft)">${p.txCount?`${p.txCount} transaction${p.txCount===1?'':'s'}`:'no direct transfers'}</div></td>
+      <td class="num">${p.sent>0.005?money(p.sent):'—'}</td>
+      <td class="num" style="color:${p.received>0.005?'var(--good)':'inherit'}">${p.received>0.005?money(p.received):'—'}</td>
+      <td class="num"><b>${Math.abs(p.net)<0.005?'even':(p.net>0?money(p.net)+' out':money(-p.net)+' in')}</b></td>
+      <td class="num" style="font-size:12.5px">
+        ${p.outstanding>0.005?`<span style="color:var(--accent)">${money(p.outstanding)} owed</span>`:''}
+        ${p.outstanding>0.005&&p.settled>0.005?'<br>':''}
+        ${p.settled>0.005?`<span style="color:var(--good)">${money(p.settled)} on shares</span>`:''}
+        ${p.outstanding<=0.005&&p.settled<=0.005?'—':''}
+      </td>
       <td style="text-align:right"><button class="btn btn-ghost btn-sm" onclick="viewPerson(${JSON.stringify(p.name).replace(/"/g,'&quot;')})">View</button></td>
     </tr>`).join('')}
-    </tbody></table>
-    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:14px">"Paid back" comes from shares logged on a shared purchase. "Still owed" comes from transactions flagged 🤝 Lent that haven't been returned.</p>`;
+    </tbody></table></div>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin-top:14px">Every e-transfer with a name is listed here. <b>Net</b> is simply what you've sent minus what they've sent you — a running feel for where you stand, not a debt. <b>Owed</b> comes from rows you flagged 🤝 Lent; <b>shares</b> from repayments logged on a shared purchase.</p>`;
 }
 
 function viewPerson(name){
