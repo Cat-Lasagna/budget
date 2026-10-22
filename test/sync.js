@@ -100,6 +100,81 @@ confirmStale = () => { staleAsked++; return Promise.resolve(true); };
   // --- 7. the stale-data dialog can't be dismissed without a choice
   check('dialog: unlocked normally', modalLocked === false);
 
+  // --- 8. offline edits survive a relaunch (backlog #1)
+  // "relaunch" = reload this device's cache, then the launch-time Drive load
+  const relaunch = async () => { editSeq = 0; Store.load(); Sync.lastModified = null; await withTimeout(loadFromDrive(), 2000); };
+  let conflictAsked = 0, conflictAnswer = true;
+  confirmUnsyncedConflict = () => { conflictAsked++; return Promise.resolve(conflictAnswer); };
+  global.fetch = realFetch;
+  // start in sync with Drive
+  state.transactions = [{ id: 'x1', date: '2026-05-01', description: 'SYNCED ROW', spent: 1, credit: 0, flags: {} }];
+  Store.save(); await withTimeout(doDrivePush(), 2000);
+  check('offline: in sync after a save', !hasUnsynced() && syncBase() === driveModified, { u: hasUnsynced(), base: syncBase(), drive: driveModified });
+
+  // 8a. edit while offline, close, reopen online; Drive unchanged meanwhile
+  Sync.signedIn = false;                                  // offline: the save stays local
+  state.transactions.push({ id: 'x2', date: '2026-05-02', description: 'OFFLINE EDIT', spent: 2, credit: 0, flags: {} });
+  Store.save();
+  check('offline: edit is marked unsynced', hasUnsynced());
+  Sync.signedIn = true; conflictAsked = 0;
+  await relaunch();
+  check('offline: edit survives relaunch (used to be lost)', state.transactions.some(t => t.id === 'x2'), state.transactions.map(t => t.id));
+  check('offline: edit uploaded to Drive', JSON.parse(driveBody).transactions.some(t => t.id === 'x2'));
+  check('offline: no question asked when Drive unchanged', conflictAsked === 0, conflictAsked);
+  check('offline: marked synced afterwards', !hasUnsynced());
+
+  // 8b. both changed: asks, and "keep this device" uploads the local copy
+  Sync.signedIn = false;
+  state.transactions.push({ id: 'x3', date: '2026-05-03', description: 'LOCAL ONLY', spent: 3, credit: 0, flags: {} });
+  Store.save();
+  const other = JSON.parse(driveBody); other.transactions.push({ id: 'r1', date: '2026-05-04', description: 'OTHER DEVICE', spent: 4, credit: 0, flags: {} });
+  driveBody = JSON.stringify(other); driveModified = 'other-device-2';
+  Sync.signedIn = true; conflictAsked = 0; conflictAnswer = true; staleAsked = 0;
+  await relaunch();
+  check('conflict: user is asked', conflictAsked === 1, conflictAsked);
+  check('conflict: keep local → local data kept', state.transactions.some(t => t.id === 'x3'));
+  check('conflict: keep local → uploaded to Drive', JSON.parse(driveBody).transactions.some(t => t.id === 'x3'));
+  check('conflict: keep local → synced, no stale prompt', !hasUnsynced() && staleAsked === 0, { u: hasUnsynced(), staleAsked });
+
+  // 8c. both changed: "use Drive" adopts Drive and clears the marker
+  Sync.signedIn = false;
+  state.transactions.push({ id: 'x4', date: '2026-05-05', description: 'DISCARD ME', spent: 5, credit: 0, flags: {} });
+  Store.save();
+  const other2 = JSON.parse(driveBody); other2.transactions.push({ id: 'r2', date: '2026-05-06', description: 'OTHER AGAIN', spent: 6, credit: 0, flags: {} });
+  driveBody = JSON.stringify(other2); driveModified = 'other-device-3';
+  Sync.signedIn = true; conflictAsked = 0; conflictAnswer = false;
+  await relaunch();
+  check('conflict: use Drive → Drive data loaded', state.transactions.some(t => t.id === 'r2') && !state.transactions.some(t => t.id === 'x4'));
+  check('conflict: use Drive → marker cleared', !hasUnsynced() && syncBase() === 'other-device-3');
+
+  // 8d. no local changes: Drive is adopted silently, as before
+  const other3 = JSON.parse(driveBody); other3.transactions.push({ id: 'r3', date: '2026-05-07', description: 'NEWER', spent: 7, credit: 0, flags: {} });
+  driveBody = JSON.stringify(other3); driveModified = 'other-device-4'; conflictAsked = 0;
+  await relaunch();
+  check('no local changes: Drive loaded without asking', conflictAsked === 0 && state.transactions.some(t => t.id === 'r3'));
+
+  // 8e. an edit made during an upload keeps the marker
+  Sync.lastModified = driveModified;
+  const up = doDrivePush();
+  await wait(40);                                        // mid-upload
+  state.transactions.push({ id: 'x5', date: '2026-05-08', description: 'MID UPLOAD', spent: 8, credit: 0, flags: {} });
+  markUnsynced();                                        // what Store.save does, without queueing a push
+  await withTimeout(up, 2000);
+  check('mid-upload edit stays marked unsynced', hasUnsynced());
+  await withTimeout(doDrivePush(), 2000);
+  check('...and the follow-up save clears it', !hasUnsynced());
+
+  // 8f. unreadable cache must never be uploaded over Drive
+  markUnsynced(); localStorage.setItem(STORAGE_KEY, '{corrupt');
+  Store.load();
+  check('corrupt cache: marker dropped, Drive copy wins', !hasUnsynced());
+
+  // 8g. "Load the newer version" in the stale dialog doesn't ask a second time
+  confirmStale = () => Promise.resolve(false); conflictAsked = 0;
+  driveModified = 'other-device-5'; Sync.lastModified = 'older'; markUnsynced();
+  await withTimeout(doDrivePush(), 2000);
+  check('stale "load newer": no second question', conflictAsked === 0 && !hasUnsynced(), { conflictAsked, u: hasUnsynced() });
+
   console.log(`${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

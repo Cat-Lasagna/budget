@@ -615,9 +615,10 @@ const Store = {
     try{ raw = localStorage.getItem(STORAGE_KEY); }catch(e){ /* preview sandboxes may block storage */ }
     if(raw){
       try{ state = JSON.parse(raw); }
-      catch(e){ toast('Saved data was unreadable — starting fresh','bad'); state=freshData(); }
+      catch(e){ toast('Saved data was unreadable — starting fresh','bad'); state=freshData(); clearUnsynced(); }
     } else {
       state = freshData();
+      clearUnsynced();          // an empty start must never be uploaded over Drive
       this.saveLocalOnly();
     }
   },
@@ -629,9 +630,29 @@ const Store = {
   // the normal save: cache immediately, then push to Drive if connected
   save(silent){
     this.saveLocalOnly();
+    markUnsynced();
     scheduleDrivePush();
   }
 };
+
+/* ---- changes Drive hasn't received yet ---------------------------------
+   Kept in this device's storage, so it survives closing the tab. Without it,
+   edits made offline were overwritten by the Drive copy on the next launch.
+   BASE is the Drive version this device last matched: if Drive still has
+   that version, the local copy is simply newer. */
+const UNSYNCED_KEY='ledger_unsynced', SYNC_BASE_KEY='ledger_drive_base';
+let editSeq=0;
+function markUnsynced(){ editSeq++; try{ localStorage.setItem(UNSYNCED_KEY,'1'); }catch(e){} }
+function clearUnsynced(){ try{ localStorage.removeItem(UNSYNCED_KEY); }catch(e){} }
+function hasUnsynced(){ try{ return localStorage.getItem(UNSYNCED_KEY)==='1'; }catch(e){ return false; } }
+function syncBase(){ try{ return localStorage.getItem(SYNC_BASE_KEY); }catch(e){ return null; } }
+/* this device now matches Drive version `modifiedTime`. `seq` is the edit
+   count when the upload started: an edit made during the upload keeps the
+   marker, and the save already queued for it will clear it */
+function markSynced(modifiedTime, seq){
+  if(seq===undefined || seq===editSeq) clearUnsynced();
+  if(modifiedTime){ try{ localStorage.setItem(SYNC_BASE_KEY, modifiedTime); }catch(e){} }
+}
 
 /* sync indicator in the top-right */
 function setSync(stateName){
@@ -3565,6 +3586,7 @@ async function findDriveFile(){
   return (data.files&&data.files.length)?data.files[0]:null;
 }
 async function createDriveFile(){
+  const seq=editSeq;
   const meta={name:DRIVE_FILENAME,mimeType:'application/json'};
   const b='ledgerbnd'+Date.now();
   const body=`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`+JSON.stringify(meta)+
@@ -3572,6 +3594,7 @@ async function createDriveFile(){
   const data=await (await driveFetch('/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime',
     {method:'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body})).json();
   Sync.fileId=data.id; Sync.lastModified=data.modifiedTime;
+  markSynced(data.modifiedTime, seq);
 }
 /* Only one Drive operation runs at a time. Two overlapping saves used to
    race: the second checked Drive while the first was still finishing, saw
@@ -3593,18 +3616,35 @@ function doDrivePush(){
   return withDriveLock(()=>{ pushQueued=false; return drivePushNow(); });
 }
 
-async function loadFromDriveNow(retried){
+/* opts.discardLocal: the user already chose the Drive copy, don't ask again */
+async function loadFromDriveNow(opts){
+  opts=opts||{};
   setSync('saving');
   try{
     await ensureFreshToken();
     const f=await findDriveFile();
     if(f){
       Sync.fileId=f.id;
+      if(!opts.discardLocal && hasUnsynced() && syncBase()===f.modifiedTime){
+        // Drive hasn't changed since this device last synced, so the local
+        // copy is just newer: upload it rather than throwing it away
+        Sync.lastModified=f.modifiedTime;
+        await drivePushNow();
+        if(!Sync.pendingPush) toast('Uploaded changes made while offline','good');
+        return;
+      }
       const text=await (await driveFetch(`/drive/v3/files/${f.id}?alt=media`)).text();
       const parsed=JSON.parse(text);
-      if(parsed && Array.isArray(parsed.accounts) && parsed.categories){
+      const valid=parsed && Array.isArray(parsed.accounts) && parsed.categories;
+      if(valid && !opts.discardLocal && hasUnsynced()){
+        // both sides changed: there is no merging, so the user picks one
+        const keepLocal=await confirmUnsyncedConflict(parsed, f.modifiedTime);
+        if(keepLocal){ Sync.lastModified=f.modifiedTime; await drivePushNow(); return; }
+      }
+      if(valid){
         state=parsed; ensureMigrations(); Store.saveLocalOnly();
         Sync.lastModified=f.modifiedTime;
+        markSynced(f.modifiedTime);
         buildNav(); switchView(currentView); updateBadge();
       }
     } else {
@@ -3613,7 +3653,7 @@ async function loadFromDriveNow(retried){
     Sync.signedIn=true; Sync.pendingPush=false;
     setSync('synced'); showOfflineBanner(false); updateSyncCard();
   }catch(e){
-    if(e&&e.auth&&!retried){ try{ await getToken(false); return loadFromDriveNow(true); }catch(_){} }
+    if(e&&e.auth&&!opts.retried){ try{ await getToken(false); return loadFromDriveNow(Object.assign({},opts,{retried:true})); }catch(_){} }
     setSync('offline'); showOfflineBanner(true); updateSyncCard();
   }
 }
@@ -3626,6 +3666,7 @@ function scheduleDrivePush(){
   pushTimer=setTimeout(doDrivePush,800);
 }
 async function drivePushNow(retried){
+  const seq=editSeq;
   try{
     await ensureFreshToken();
     if(!Sync.fileId){ const f=await findDriveFile(); if(f){Sync.fileId=f.id;Sync.lastModified=f.modifiedTime;} else { await createDriveFile(); setSync('synced'); return; } }
@@ -3633,11 +3674,12 @@ async function drivePushNow(retried){
     const meta=await (await driveFetch(`/drive/v3/files/${Sync.fileId}?fields=modifiedTime`)).json();
     if(Sync.lastModified && meta.modifiedTime && meta.modifiedTime!==Sync.lastModified){
       const overwrite=await confirmStale();
-      if(!overwrite){ await loadFromDriveNow(); return; }   // already holding the lock
+      if(!overwrite){ await loadFromDriveNow({discardLocal:true}); return; }   // already holding the lock
     }
     const data=await (await driveFetch(`/upload/drive/v3/files/${Sync.fileId}?uploadType=media&fields=modifiedTime`,
       {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)})).json();
     Sync.lastModified=data.modifiedTime;
+    markSynced(data.modifiedTime, seq);
     Sync.pendingPush=false; setSync('synced'); showOfflineBanner(false);
   }catch(e){
     if(e&&e.auth&&!retried){ try{ await getToken(false); return drivePushNow(true); }catch(_){} }
@@ -3645,17 +3687,36 @@ async function drivePushNow(retried){
   }
   updateSyncCard();
 }
+/* this device has changes Drive never got, and Drive changed elsewhere too */
+function confirmUnsyncedConflict(remote, remoteModified){
+  return new Promise(resolve=>{
+    const choose=v=>{ lockModal(false); closeModal(); resolve(v); };
+    const n=x=>((x&&x.transactions)||[]).length.toLocaleString('en-CA');
+    let when=''; try{ when=new Date(remoteModified).toLocaleString('en-CA',{dateStyle:'medium',timeStyle:'short'}); }catch(e){}
+    setModal('Two different versions',
+      `<p style="line-height:1.6">This device has changes that never reached Google Drive — probably made while offline. Drive was also changed from another device since then.</p>
+      <div style="margin:14px 0;font-size:13.5px;line-height:1.7">
+        <div><b>This device:</b> ${n(state)} transactions</div>
+        <div><b>Google Drive:</b> ${n(remote)} transactions${when?` · changed ${esc(when)}`:''}</div>
+      </div>
+      <p style="font-size:13px;color:var(--ink-soft);line-height:1.6">Only one version can be kept. The other is replaced.
+        <a href="#" style="color:var(--accent)" onclick="exportJSON();return false">Download this device's version as a backup</a> first if you're unsure.</p>`,
+      [{label:'Use the Drive version',cls:'btn-ghost',fn:()=>choose(false)},
+       {label:'Keep this device\u2019s version',cls:'btn-danger',fn:()=>choose(true)}]);
+    lockModal(true);
+  });
+}
 /* Sync waits on this answer, so the dialog can only be closed by choosing:
    dismissing it with Escape or a tap outside would leave sync stuck */
 let modalLocked=false;
 function confirmStale(){
   return new Promise(resolve=>{
-    const choose=v=>{ modalLocked=false; closeModal(); resolve(v); };
+    const choose=v=>{ lockModal(false); closeModal(); resolve(v); };
     setModal('Newer changes found on Drive',
       `<p style="line-height:1.6">This data was changed somewhere else — probably another device — since you opened it here. What would you like to do?</p>`,
       [{label:'Load the newer version',cls:'btn-ghost',fn:()=>choose(false)},
        {label:'Overwrite with this device',cls:'btn-danger',fn:()=>choose(true)}]);
-    modalLocked=true;
+    lockModal(true);
   });
 }
 function showOfflineBanner(show){ const b=document.getElementById('offlineBanner'); if(b) b.classList.toggle('show',show); }
@@ -3731,7 +3792,14 @@ function setModal(title, bodyHTML, buttons){
   });
   document.getElementById('overlay').classList.add('show');
 }
-function closeModal(){ document.getElementById('overlay').classList.remove('show'); }
+/* every way of closing a dialog (×, Escape, tapping outside) comes through
+   here, so a sync choice that must be answered can't be dismissed */
+function closeModal(){ if(modalLocked) return; document.getElementById('overlay').classList.remove('show'); }
+function lockModal(on){
+  modalLocked=on;
+  const x=document.querySelector('.modal-head .icon-btn');
+  if(x) x.style.display=on?'none':'';
+}
 function confirmDialog(title,msg,onYes){
   setModal(title, `<p style="font-size:15px;line-height:1.6">${msg}</p>`, [
     {label:'Cancel',cls:'btn-ghost',fn:closeModal},
@@ -3832,8 +3900,8 @@ function download(blob,filename){
 function todayStr(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 
 /* close modal on backdrop click / Escape */
-document.getElementById('overlay').addEventListener('click',e=>{ if(e.target.id==='overlay' && !modalLocked) closeModal(); });
-document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !modalLocked) closeModal(); });
+document.getElementById('overlay').addEventListener('click',e=>{ if(e.target.id==='overlay') closeModal(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
 
 /* ============================================================
    9. LAUNCH
