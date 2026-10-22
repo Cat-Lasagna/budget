@@ -2266,7 +2266,7 @@ function parseStatementPdf(lines){
   const acct=text.match(/Account number:\s*(\d{4}[\s\dXx]{6,})/);
   if(acct) card=acct[1].trim().replace(/\s+/g,' ');
   let current=card;
-  const rows=[], seen=new Set();
+  let rows=[];
   let interest=0;
 
   lines.forEach(line=>{
@@ -2285,9 +2285,7 @@ function parseStatementPdf(lines){
     // negative on a statement means money came back to you
     const spent=val>0?val.toFixed(2):'';
     const credit=val<0?Math.abs(val).toFixed(2):'';
-    const key=date+'|'+desc+'|'+spent+'|'+credit;
-    if(seen.has(key)) return;
-    seen.add(key);
+    // identical lines are kept: two coffees on the same day are two purchases
     rows.push([date,desc,spent,credit,current]);
   });
 
@@ -2301,16 +2299,32 @@ function parseStatementPdf(lines){
   }
 
   // cross-check against the totals the statement prints for itself
-  const checks=[];
-  const sp=rows.reduce((a,r)=>a+(parseFloat(r[2])||0),0)-interest;
-  const cr=rows.reduce((a,r)=>a+(parseFloat(r[3])||0),0);
   const mp=text.match(/Total purchases\s+\$?([\d,]+\.\d{2})/);
-  if(mp){ const want=pdfMoney(mp[1]);
-    checks.push({ok:Math.abs(want-sp)<0.01, label:'Purchases', want, got:sp}); }
   const mc=text.match(/Total payments received\s+-?\$?([\d,]+\.\d{2})/);
-  if(mc){ const want=pdfMoney(mc[1]);
-    checks.push({ok:Math.abs(want-cr)<0.01, label:'Payments', want, got:cr}); }
-  return {rows, card, interest, checks};
+  const checksFor=rs=>{
+    const checks=[];
+    const sp=rs.reduce((a,r)=>a+(parseFloat(r[2])||0),0)-interest;
+    const cr=rs.reduce((a,r)=>a+(parseFloat(r[3])||0),0);
+    if(mp){ const want=pdfMoney(mp[1]);
+      checks.push({ok:Math.abs(want-sp)<0.01, label:'Purchases', want, got:sp}); }
+    if(mc){ const want=pdfMoney(mc[1]);
+      checks.push({ok:Math.abs(want-cr)<0.01, label:'Payments', want, got:cr}); }
+    return checks;
+  };
+  let checks=checksFor(rows);
+  // If the totals only reconcile once exact repeats are dropped, the statement
+  // printed those lines twice (e.g. a repeated section), so drop them. When the
+  // totals already match, or there are none to check, every line is kept.
+  let droppedRepeats=0;
+  if(checks.length && !checks.every(c=>c.ok)){
+    const seen=new Set();
+    const unique=rows.filter(r=>{ const k=r.join('|'); if(seen.has(k)) return false; seen.add(k); return true; });
+    if(unique.length<rows.length){
+      const uniqueChecks=checksFor(unique);
+      if(uniqueChecks.every(c=>c.ok)){ droppedRepeats=rows.length-unique.length; rows=unique; checks=uniqueChecks; }
+    }
+  }
+  return {rows, card, interest, checks, droppedRepeats};
 }
 
 /* ============================================================
@@ -2369,6 +2383,7 @@ function onCsvChosen(e){
         pf.delimiter=',';
         pf.pdfChecks=res.checks;
         pf.pdfInterest=res.interest;
+        pf.pdfDroppedRepeats=res.droppedRepeats;
         if(!res.rows.length) pf.pdfError='No transactions found in this PDF. It may be a scanned image, or a statement layout the reader does not recognize.';
         // match this PDF to an account by its card number, if we can
         if(res.card){
@@ -2464,6 +2479,7 @@ function renderAssignStep(){
           ${checks.length?`<p style="font-size:12.5px;color:${allOk?'var(--good)':'var(--warn)'}">
             ${allOk?'✓ Totals match the statement':'⚠️ Totals do not match the statement — check before importing'}
             <span style="color:var(--ink-soft)"> · ${checks.map(c=>`${c.label}: ${money(c.got)} vs ${money(c.want)} stated`).join(' · ')}</span></p>`:''}
+          ${pf.pdfDroppedRepeats?`<p style="font-size:12.5px;color:var(--ink-soft)">${pf.pdfDroppedRepeats} line${pf.pdfDroppedRepeats===1?' was':'s were'} printed twice on the statement and skipped, so the totals match.</p>`:''}
           ${pf.pdfInterest>0?`<p style="font-size:12.5px;color:var(--ink-soft)">Interest of ${money(pf.pdfInterest)} was charged, so it's included as a transaction.</p>`:''}
           ${pf.rows.length?`<div style="overflow-x:auto;margin-top:8px"><table style="min-width:100%"><tbody>
             ${pf.rows.slice(0,3).map(r=>`<tr>${r.map(v=>`<td style="font-size:12px;color:var(--ink-soft);white-space:nowrap">${esc(v)}</td>`).join('')}</tr>`).join('')}
@@ -2966,6 +2982,7 @@ function renderSplitModal(){
     <div style="margin-bottom:14px">
       <div style="font-size:14px;font-weight:600">${esc(t.description)}</div>
       <div style="font-size:12.5px;color:var(--ink-soft)">${esc(t.date)} · total ${money(b.amount)}</div>
+      ${repaidTotal(t)?`<div style="font-size:12.5px;color:var(--ink-soft);margin-top:6px">${money(repaidTotal(t))} paid back by others is divided across the parts in proportion to their amounts.</div>`:''}
     </div>
     ${splitParts.map((p,i)=>`<div class="row" style="align-items:flex-end;margin-bottom:8px">
       <div class="field" style="flex:0 0 120px;margin:0"><label>Amount</label>
@@ -2989,6 +3006,22 @@ function renderSplitModal(){
     {label:'Split it',cls:'btn-primary',fn:applySplit}
   ]);
 }
+/* divide each repayment across the parts in proportion to their amounts;
+   rounding is settled on the last part so every person's total is exact */
+function splitRepayments(repayments, partAmounts, total){
+  const out=partAmounts.map(()=>[]);
+  (repayments||[]).forEach(r=>{
+    const amt=Number(r.amount)||0;
+    let given=0;
+    partAmounts.forEach((pa,i)=>{
+      const share = i===partAmounts.length-1 ? +(amt-given).toFixed(2)
+                                             : +(total ? amt*pa/total : 0).toFixed(2);
+      given=+(given+share).toFixed(2);
+      if(share>0) out[i].push({person:r.person, amount:share});
+    });
+  });
+  return out;
+}
 function fillSplitRemainder(){
   const t=state.transactions.find(x=>x.id===splitTxnId); if(!t) return;
   const b=splitBasis(t);
@@ -3008,11 +3041,15 @@ function applySplit(){
   snapshotAllForUndo();
   const parentId=t.splitOf||t.id;
   const idx=state.transactions.findIndex(x=>x.id===t.id);
+  const repShares=splitRepayments(t.repayments, parts.map(p=>Number(p.amount)), b.amount);
   const children=parts.map((p,i)=>{
     const c=JSON.parse(JSON.stringify(t));
     c.id=uid();
     c.spent = b.field==='spent' ? Number(p.amount) : 0;
     c.credit = b.field==='credit' ? Number(p.amount) : 0;
+    // each part carries only its share of what people paid back — copying the
+    // full list onto every part would subtract the same money once per part
+    if(repShares[i].length) c.repayments=repShares[i]; else delete c.repayments;
     c.categoryId=p.categoryId;
     c.adjusted=null;
     c.manualCategory=true;              // bulk re-apply must not undo the split
@@ -3038,6 +3075,14 @@ function mergeSplit(id){
   // keep the category of the largest part
   merged.categoryId=sibs.slice().sort((a,b)=>(Number(b.spent)||Number(b.credit)||0)-(Number(a.spent)||Number(a.credit)||0))[0].categoryId;
   merged.notes=(first.notes||'').replace(/\s*·?\s*Split \d+ of \d+/,'').trim();
+  // add each person's shares back together
+  const reps=[], byPerson={};
+  sibs.forEach(x=>(x.repayments||[]).forEach(r=>{
+    const k=(r.person||'').trim();
+    if(byPerson[k]===undefined){ byPerson[k]=reps.length; reps.push({person:r.person, amount:0}); }
+    reps[byPerson[k]].amount=+(reps[byPerson[k]].amount+(Number(r.amount)||0)).toFixed(2);
+  }));
+  if(reps.length) merged.repayments=reps; else delete merged.repayments;
   delete merged.splitOf;
   const idx=state.transactions.findIndex(x=>x.id===first.id);
   state.transactions=state.transactions.filter(x=>x.splitOf!==t.splitOf);
