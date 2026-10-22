@@ -3446,7 +3446,10 @@ function renderChartControls(){
    immediately and push to Drive in the background.
    ============================================================ */
 const Sync = { enabled:false, signedIn:false, token:null, tokenExpiry:0, fileId:null,
-  lastModified:null, tokenClient:null, _resolver:null, pendingPush:false };
+  lastModified:null, tokenClient:null, pendingPush:false,
+  // a silent sign-in Google never answers must not leave sync waiting forever;
+  // an interactive one gets longer because the user may be typing a password
+  silentTokenTimeoutMs:20000, interactiveTokenTimeoutMs:300000 };
 
 function initSync(){
   const cid=getClientId();
@@ -3495,21 +3498,37 @@ function saveClientId(){
 let editingClientId=false;
 function changeClientId(){ editingClientId=true; updateSyncCard(); }
 function cancelClientIdEdit(){ editingClientId=false; updateSyncCard(); }
+/* Everyone waiting for a token is answered together. Previously only the
+   most recent caller was remembered, so when a load and a save both asked
+   at once, the first one waited forever and sync sat on "Saving…". */
+let tokenWaiters=[], tokenTimer=null;
+function settleToken(ok,value){
+  clearTimeout(tokenTimer); tokenTimer=null;
+  const waiters=tokenWaiters; tokenWaiters=[];
+  waiters.forEach(w=>ok?w.resolve(value):w.reject(value));
+}
 function onToken(resp){
   if(resp && resp.access_token){
     Sync.token=resp.access_token;
     Sync.tokenExpiry=Date.now()+(Number(resp.expires_in||3600)*1000);
     Sync.signedIn=true;
-    if(Sync._resolver){ Sync._resolver.resolve(resp); Sync._resolver=null; }
-  } else if(Sync._resolver){ Sync._resolver.reject(resp); Sync._resolver=null; }
+    settleToken(true,resp);
+  } else settleToken(false,resp);
 }
-function onTokenError(err){ if(Sync._resolver){ Sync._resolver.reject(err); Sync._resolver=null; } }
+function onTokenError(err){ settleToken(false,err); }
 function getToken(interactive){
   return new Promise((resolve,reject)=>{
     if(!Sync.tokenClient) return reject('not ready');
-    Sync._resolver={resolve,reject};
+    const inFlight=tokenWaiters.length>0;
+    tokenWaiters.push({resolve,reject});
+    // a silent request already on its way will answer this caller too; an
+    // interactive one still opens the popup, since it comes from a tap
+    if(inFlight && !interactive) return;
     try{ Sync.tokenClient.requestAccessToken({prompt: interactive?'consent':''}); }
-    catch(e){ Sync._resolver=null; reject(e); }
+    catch(e){ settleToken(false,e); return; }
+    clearTimeout(tokenTimer);
+    tokenTimer=setTimeout(()=>settleToken(false,{timeout:true}),
+      interactive?Sync.interactiveTokenTimeoutMs:Sync.silentTokenTimeoutMs);
   });
 }
 async function ensureFreshToken(){
@@ -3554,7 +3573,27 @@ async function createDriveFile(){
     {method:'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body})).json();
   Sync.fileId=data.id; Sync.lastModified=data.modifiedTime;
 }
-async function loadFromDrive(){
+/* Only one Drive operation runs at a time. Two overlapping saves used to
+   race: the second checked Drive while the first was still finishing, saw
+   the first one's change, mistook it for another device's edit, and asked
+   "Newer changes found on Drive". */
+let driveQueue=Promise.resolve();
+function withDriveLock(fn){
+  const run=driveQueue.then(fn,fn);
+  driveQueue=run.catch(()=>{});
+  return run;
+}
+function loadFromDrive(){ return withDriveLock(()=>loadFromDriveNow()); }
+let pushQueued=false;
+function doDrivePush(){
+  // one save waiting in line is enough: it uploads whatever the data is
+  // when its turn comes, so it carries every edit made in the meantime
+  if(pushQueued) return driveQueue;
+  pushQueued=true;
+  return withDriveLock(()=>{ pushQueued=false; return drivePushNow(); });
+}
+
+async function loadFromDriveNow(retried){
   setSync('saving');
   try{
     await ensureFreshToken();
@@ -3574,7 +3613,7 @@ async function loadFromDrive(){
     Sync.signedIn=true; Sync.pendingPush=false;
     setSync('synced'); showOfflineBanner(false); updateSyncCard();
   }catch(e){
-    if(e&&e.auth){ try{ await getToken(false); return loadFromDrive(); }catch(_){} }
+    if(e&&e.auth&&!retried){ try{ await getToken(false); return loadFromDriveNow(true); }catch(_){} }
     setSync('offline'); showOfflineBanner(true); updateSyncCard();
   }
 }
@@ -3586,7 +3625,7 @@ function scheduleDrivePush(){
   clearTimeout(pushTimer);
   pushTimer=setTimeout(doDrivePush,800);
 }
-async function doDrivePush(){
+async function drivePushNow(retried){
   try{
     await ensureFreshToken();
     if(!Sync.fileId){ const f=await findDriveFile(); if(f){Sync.fileId=f.id;Sync.lastModified=f.modifiedTime;} else { await createDriveFile(); setSync('synced'); return; } }
@@ -3594,24 +3633,29 @@ async function doDrivePush(){
     const meta=await (await driveFetch(`/drive/v3/files/${Sync.fileId}?fields=modifiedTime`)).json();
     if(Sync.lastModified && meta.modifiedTime && meta.modifiedTime!==Sync.lastModified){
       const overwrite=await confirmStale();
-      if(!overwrite){ await loadFromDrive(); return; }
+      if(!overwrite){ await loadFromDriveNow(); return; }   // already holding the lock
     }
     const data=await (await driveFetch(`/upload/drive/v3/files/${Sync.fileId}?uploadType=media&fields=modifiedTime`,
       {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)})).json();
     Sync.lastModified=data.modifiedTime;
     Sync.pendingPush=false; setSync('synced'); showOfflineBanner(false);
   }catch(e){
-    if(e&&e.auth){ try{ await getToken(false); return doDrivePush(); }catch(_){} }
+    if(e&&e.auth&&!retried){ try{ await getToken(false); return drivePushNow(true); }catch(_){} }
     Sync.pendingPush=true; setSync('offline'); showOfflineBanner(true);
   }
   updateSyncCard();
 }
+/* Sync waits on this answer, so the dialog can only be closed by choosing:
+   dismissing it with Escape or a tap outside would leave sync stuck */
+let modalLocked=false;
 function confirmStale(){
   return new Promise(resolve=>{
+    const choose=v=>{ modalLocked=false; closeModal(); resolve(v); };
     setModal('Newer changes found on Drive',
       `<p style="line-height:1.6">This data was changed somewhere else — probably another device — since you opened it here. What would you like to do?</p>`,
-      [{label:'Load the newer version',cls:'btn-ghost',fn:()=>{closeModal();resolve(false);}},
-       {label:'Overwrite with this device',cls:'btn-danger',fn:()=>{closeModal();resolve(true);}}]);
+      [{label:'Load the newer version',cls:'btn-ghost',fn:()=>choose(false)},
+       {label:'Overwrite with this device',cls:'btn-danger',fn:()=>choose(true)}]);
+    modalLocked=true;
   });
 }
 function showOfflineBanner(show){ const b=document.getElementById('offlineBanner'); if(b) b.classList.toggle('show',show); }
@@ -3677,6 +3721,7 @@ window.addEventListener('offline', ()=>{ if(Sync.signedIn){ setSync('offline'); 
    8. SHARED UI HELPERS  (modal, confirm, toast, misc)
    ============================================================ */
 function setModal(title, bodyHTML, buttons){
+  if(modalLocked) return;   // a sync decision is on screen; it must be answered first
   document.getElementById('modalTitle').textContent=title;
   document.getElementById('modalBody').innerHTML=bodyHTML;
   const foot=document.getElementById('modalFoot'); foot.innerHTML='';
@@ -3787,8 +3832,8 @@ function download(blob,filename){
 function todayStr(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 
 /* close modal on backdrop click / Escape */
-document.getElementById('overlay').addEventListener('click',e=>{ if(e.target.id==='overlay') closeModal(); });
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+document.getElementById('overlay').addEventListener('click',e=>{ if(e.target.id==='overlay' && !modalLocked) closeModal(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && !modalLocked) closeModal(); });
 
 /* ============================================================
    9. LAUNCH
