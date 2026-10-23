@@ -38,7 +38,8 @@ check('autoProcess: known merchant categorized', m.categoryId === rule.categoryI
 
 for (const f of ['aggregate','creditOffset','displayAmount','buildPreview','peopleSummary','ensureMigrations',
   'parseStatementPdf','pdfItemsToLines','dataHealth','auditTruthTable','suggestedRules','cardAssignmentReport',
-  'openSplitModal','mergeSplit','startReviewQueue','snapshotForUndo','renderLedger','doDrivePush','loadFromDrive'])
+  'openSplitModal','mergeSplit','startReviewQueue','snapshotForUndo','renderLedger','doDrivePush','loadFromDrive',
+  'renderDashboard','renderInsights','renderMore','recurringCharges','topMerchants','txRowHTML','openLedgerFilters'])
   check('subsystem present: ' + f, exists(f));
 
 console.log(`${pass} passed, ${fail} failed`);
