@@ -216,6 +216,39 @@ confirmStale = () => { staleAsked++; return Promise.resolve(true); };
   check('live counts: several saves, one refresh', dashRenders === 2, dashRenders);
   renderDashboard = realRenderDash;
 
+  // --- 12. the sign-in pass survives a reload until it runs out
+  let lastPrompt = null;
+  Sync.tokenClient = { requestAccessToken(o) { lastPrompt = o.prompt; realSetTimeout(() => onToken({ access_token: 'saved-tok', expires_in: 3600 }), 5); } };
+  Sync.clientId = 'cid-1';
+  await withTimeout(getToken(true), 1000);
+  check('pass: interactive sign-in asks permission only the first time', lastPrompt === '', lastPrompt);
+  check('pass: saved on the device', JSON.parse(localStorage.getItem('ledger_drive_token')).token === 'saved-tok');
+  // "reload": memory is gone, the saved pass is picked up without asking Google
+  Sync.token = null; Sync.signedIn = false; Sync.tokenExpiry = 0;
+  check('pass: restored after a reload', restoreSavedToken() === true && Sync.token === 'saved-tok' && Sync.signedIn === true);
+  // an expired pass is not used
+  localStorage.setItem('ledger_drive_token', JSON.stringify({ token: 'old', expiry: Date.now() + 30000, cid: 'cid-1' }));
+  Sync.token = null; Sync.signedIn = false;
+  check('pass: expired one is not used', restoreSavedToken() === false && Sync.token === null && localStorage.getItem('ledger_drive_token') === null);
+  // a pass for a different Client ID is not used
+  localStorage.setItem('ledger_drive_token', JSON.stringify({ token: 'x', expiry: Date.now() + 3600e3, cid: 'cid-OTHER' }));
+  check('pass: other Client ID is not used', restoreSavedToken() === false);
+  // Drive rejects it: dropped
+  localStorage.setItem('ledger_drive_token', JSON.stringify({ token: 'bad', expiry: Date.now() + 3600e3, cid: 'cid-1' }));
+  restoreSavedToken();
+  const goodFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 401 });
+  tokenMode = 'silent'; Sync.tokenClient = fakeTokenClient(); Sync.silentTokenTimeoutMs = 30;
+  await withTimeout(doDrivePush(), 2000);
+  check('pass: rejected one is forgotten', localStorage.getItem('ledger_drive_token') === null && Sync.signedIn === false);
+  global.fetch = goodFetch; tokenMode = 'answer';
+  // signing out forgets it
+  localStorage.setItem('ledger_drive_token', JSON.stringify({ token: 'y', expiry: Date.now() + 3600e3, cid: 'cid-1' }));
+  global.google = { accounts: { oauth2: { revoke() {} } } };
+  driveSignOut = driveSignOut;   // real function
+  try { driveSignOut(); } catch (e) {}
+  check('pass: sign out forgets it', localStorage.getItem('ledger_drive_token') === null);
+
   console.log(`${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

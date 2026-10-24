@@ -4190,6 +4190,8 @@ function initSync(){
       client_id:cid, scope:DRIVE_SCOPE,
       callback:onToken, error_callback:onTokenError
     });
+    // a pass saved earlier on this device and still valid: no sign-in needed
+    if(restoreSavedToken()){ loadFromDrive(); return; }
     trySilentSignIn();
   };
   if(ready()) start();
@@ -4234,11 +4236,29 @@ function settleToken(ok,value){
   const waiters=tokenWaiters; tokenWaiters=[];
   waiters.forEach(w=>ok?w.resolve(value):w.reject(value));
 }
+/* Google's browser sign-in hands out a pass that lasts about an hour. It
+   used to live only in memory, so every reload (reopening the app, or a
+   phone quietly reloading a background tab) asked to sign in again. Keep it
+   on this device until it runs out. It only opens files this app created. */
+const TOKEN_KEY='ledger_drive_token';
+function saveToken(){
+  try{ localStorage.setItem(TOKEN_KEY, JSON.stringify({token:Sync.token, expiry:Sync.tokenExpiry, cid:Sync.clientId||null})); }catch(e){}
+}
+function forgetToken(){ try{ localStorage.removeItem(TOKEN_KEY); }catch(e){} }
+function restoreSavedToken(){
+  let saved=null;
+  try{ saved=JSON.parse(localStorage.getItem(TOKEN_KEY)||'null'); }catch(e){}
+  if(!saved || !saved.token || !(saved.expiry-60000>Date.now())) { forgetToken(); return false; }
+  if(saved.cid && Sync.clientId && saved.cid!==Sync.clientId){ forgetToken(); return false; }   // issued for a different Client ID
+  Sync.token=saved.token; Sync.tokenExpiry=saved.expiry; Sync.signedIn=true;
+  return true;
+}
 function onToken(resp){
   if(resp && resp.access_token){
     Sync.token=resp.access_token;
     Sync.tokenExpiry=Date.now()+(Number(resp.expires_in||3600)*1000);
     Sync.signedIn=true;
+    saveToken();
     settleToken(true,resp);
   } else settleToken(false,resp);
 }
@@ -4251,7 +4271,9 @@ function getToken(interactive){
     // a silent request already on its way will answer this caller too; an
     // interactive one still opens the popup, since it comes from a tap
     if(inFlight && !interactive) return;
-    try{ Sync.tokenClient.requestAccessToken({prompt: interactive?'consent':''}); }
+    // '' = Google asks for permission only the first time; later sign-ins are a quick
+    // window that closes itself. ('consent' forced the full permission screen every time.)
+    try{ Sync.tokenClient.requestAccessToken({prompt:''}); }
     catch(e){ settleToken(false,e); return; }
     clearTimeout(tokenTimer);
     tokenTimer=setTimeout(()=>settleToken(false,{timeout:true}),
@@ -4267,7 +4289,7 @@ async function ensureFreshToken(){
 /* the login lapsed and Google won't renew it without a tap: say "Sign in"
    rather than "Offline". Unsynced edits stay marked and upload after sign-in. */
 function needSignInAgain(){
-  Sync.signedIn=false; Sync.token=null; Sync.pendingPush=true;
+  Sync.signedIn=false; Sync.token=null; Sync.pendingPush=true; forgetToken();
   showOfflineBanner(false); setSync('local'); updateSyncCard();
 }
 async function trySilentSignIn(){
@@ -4287,7 +4309,7 @@ function onSyncPillClick(){
 }
 function driveSignOut(){
   try{ if(Sync.token && google.accounts.oauth2.revoke) google.accounts.oauth2.revoke(Sync.token,()=>{}); }catch(e){}
-  Sync.token=null; Sync.signedIn=false; Sync.fileId=null; Sync.lastModified=null;
+  Sync.token=null; Sync.signedIn=false; Sync.fileId=null; Sync.lastModified=null; forgetToken();
   // keep the Client ID: signing out should offer a plain "Sign in with Google"
   Sync.enabled = !!getClientId();
   if(Sync.enabled && !Sync.tokenClient) initSync();
@@ -4297,7 +4319,7 @@ function driveSignOut(){
 async function driveFetch(path,opts){
   opts=opts||{}; opts.headers=Object.assign({Authorization:'Bearer '+Sync.token},opts.headers||{});
   const res=await fetch('https://www.googleapis.com'+path,opts);
-  if(res.status===401) throw {auth:true};
+  if(res.status===401){ forgetToken(); throw {auth:true}; }
   if(!res.ok) throw new Error('Drive error '+res.status);
   return res;
 }
