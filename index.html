@@ -1625,7 +1625,7 @@ function renderReviewCard(){
     <div id="rq_similar" hidden></div>
     <div class="field"><label>Category</label>
       <select id="rq_cat" style="padding:12px;font-size:15px">${categoryOptions(t.categoryId)}</select></div>
-    <label class="checkline" style="margin-top:4px"><input type="checkbox" id="rq_rule" style="width:auto" ${similar?'checked':''}>
+    <label class="checkline" style="margin-top:4px"><input type="checkbox" id="rq_rule" style="width:auto">
       <span>Also make a rule so this files itself next time</span></label>
   `, [
     {label:'Skip',cls:'btn-ghost',fn:()=>{reviewIdx++;renderReviewCard();}},
@@ -1653,7 +1653,7 @@ function toggleReviewSimilar(){
   const list=similarTransactions(t, kw);
   // how they're filed now: the most useful thing to know before a rule
   const byCat={}; let unfiled=0, waiting=0;
-  list.forEach(x=>{ const c=catById(x.categoryId); if(c) byCat[c.id]=(byCat[c.id]||0)+1; else unfiled++; if(x.flags&&x.flags.needsReview) waiting++; });
+  list.forEach(x=>{ const c=catById(x.categoryId); if(c) byCat[c.id]=(byCat[c.id]||0)+1; else unfiled++; if(x.flags&&x.flags.needsReview&&ruleMayFile(x)) waiting++; });
   const cats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
   const top=cats[0];
   const SHOW=12;
@@ -1661,7 +1661,7 @@ function toggleReviewSimilar(){
     <div class="similar-sum">
       Matching <b>“${esc(kw)}”</b>:
       ${cats.slice(0,3).map(([id,n])=>`${n} in ${esc(catName(id))}`).join(', ')}${cats.length>3?`, ${cats.length-3} other categor${cats.length-3===1?'y':'ies'}`:''}${cats.length&&unfiled?', ':''}${unfiled?`${unfiled} without a category`:''}.
-      ${waiting?`<br>A rule would file the ${waiting} still waiting for review. Ones you already filed stay as they are.`:''}
+      <br>${waiting?`A rule would file the ${waiting} still waiting for a category.`:'A rule would not change any of these.'} Anything already filed, or marked work, lent or transfer, stays as it is.
     </div>
     ${top?`<button type="button" class="chip" style="margin:2px 0 10px" onclick="document.getElementById('rq_cat').value='${top[0]}'">Use ${esc(catName(top[0]))}</button>`:''}
     <div class="similar-list">${list.slice(0,SHOW).map(x=>txRowHTML(x,{compact:true,readOnly:true})).join('')}</div>
@@ -2259,13 +2259,26 @@ function saveRule(id,opts){
   if(opts.onSaved) opts.onSaved();
 }
 
+/* Rules only ever fill in a blank. A transaction that already has a
+   category, or that the user marked work, lent, transfer or balancing, is
+   a decision already made and is never changed by a rule. (E-transfer is
+   not on that list: every e-transfer carries it automatically, and rules
+   keyed on a person's name are how e-transfers get filed.) */
+const RULE_PROTECTING_FLAGS=['workExpense','lentOut','isInterAccountTransfer','isBalancing'];
+function ruleMayFile(t){
+  if(!t || t.manualCategory) return false;
+  if(catById(t.categoryId)) return false;
+  const f=t.flags||{};
+  return !RULE_PROTECTING_FLAGS.some(k=>f[k]);
+}
 /* re-check only the transactions that still need review; if a rule now
-   matches, file it and clear the review flag. Never touches anything the
-   user already categorized. Called automatically whenever rules change. */
+   matches one that may be filed, file it and clear the review flag.
+   Called automatically whenever rules change. */
 function applyRulesToReview(){
   let changed=0;
   state.transactions.forEach(t=>{
     if(!(t.flags && t.flags.needsReview)) return;
+    if(!ruleMayFile(t)) return;
     const rule=categorize(t.description);
     if(rule){ t.categoryId=rule.categoryId; t.flags.needsReview=false; changed++; }
   });
@@ -2281,14 +2294,14 @@ function deleteRule(id){
   });
 }
 function reapplyTruth(){
-  const targets=state.transactions.filter(t=> (t.flags&&t.flags.needsReview) || !t.categoryId );
+  const targets=state.transactions.filter(ruleMayFile);
   if(state.transactions.length===0){ toast('No transactions to categorize yet','bad'); return; }
   confirmDialog('Re-apply rules',
-    `This re-checks the ${targets.length} transaction${targets.length===1?'':'s'} that are uncategorized or need review against your current rules. Manually-set categories are left untouched. Continue?`,
+    `This checks the ${targets.length} transaction${targets.length===1?'':'s'} without a category against your current rules. Anything that already has a category, or is marked work, lent, transfer or balancing, is left as it is. Continue?`,
     ()=>{
       snapshotRulesForUndo();
       let changed=0;
-      targets.forEach(t=>{ if(t.manualCategory) return; const before=t.categoryId; autoProcess(t,{preserveManual:true}); if(t.categoryId!==before) changed++; });
+      targets.forEach(t=>{ const before=t.categoryId; autoProcess(t,{preserveManual:true}); if(t.categoryId!==before) changed++; });
       Store.save(); updateBadge(); auditCache=null; renderTruthTable();
       toast(`Re-applied — ${changed} transaction${changed===1?'':'s'} updated`,'good',{label:'Undo',fn:performUndo});
     });

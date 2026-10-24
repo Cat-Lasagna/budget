@@ -64,5 +64,32 @@ check('pdf: no totals line, both kept', r.rows.length === 2, r.rows.length);
 r = parseStatementPdf([hdr, coffee, coffee, 'Total purchases   $9.99']);
 check('pdf: real mismatch still flagged', r.rows.length === 2 && !r.checks[0].ok, r.checks);
 
+// --- Rules only fill in blanks: never change a category or a decision flag
+state.truthTable = [{ id: 'r1', keyword: 'TIM HORTONS', categoryId: rest, matchType: 'contains' }];
+const R = (id, o) => Object.assign({ id, accountId: 'a1', date: '2026-05-10', description: 'TIM HORTONS #1 MARKHAM ON', spent: 5, credit: 0, categoryId: null, adjusted: null, flags: { needsReview: true } }, o);
+state.transactions = [
+  R('blank'),
+  R('hasCat', { categoryId: gro }),
+  R('work', { flags: { needsReview: true, workExpense: true } }),
+  R('lent', { flags: { needsReview: true, lentOut: true } }),
+  R('xfer', { flags: { needsReview: true, isInterAccountTransfer: true } }),
+  R('bal', { flags: { needsReview: true, isBalancing: true } }),
+  R('etr', { description: 'INTERNET BANKING E-TRANSFER 105964167501 TIM HORTONS', flags: { needsReview: true, eTransferMethod: true } }),
+];
+const byId = id => state.transactions.find(t => t.id === id);
+const filed = applyRulesToReview();
+check('rule: blank transaction is filed', byId('blank').categoryId === rest && !byId('blank').flags.needsReview);
+check('rule: existing category not overwritten', byId('hasCat').categoryId === gro && byId('hasCat').flags.needsReview === true);
+['work', 'lent', 'xfer', 'bal'].forEach(id => check(`rule: ${id}-flagged row untouched`, byId(id).categoryId === null && byId(id).flags.needsReview === true));
+check('rule: e-transfer can still be filed by a rule', byId('etr').categoryId === rest);
+check('rule: count reports only what changed', filed === 2, filed);
+
+// re-apply follows the same rule
+state.transactions = [R('blank2', { flags: {} }), R('hasCat2', { categoryId: gro, flags: {} }), R('work2', { flags: { workExpense: true } })];
+reapplyTruth();
+check('re-apply: blank filed', byId('blank2').categoryId === rest);
+check('re-apply: category kept', byId('hasCat2').categoryId === gro);
+check('re-apply: work-flagged row untouched', byId('work2').categoryId === null);
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
