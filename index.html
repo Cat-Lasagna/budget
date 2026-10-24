@@ -148,6 +148,8 @@ nav{
 .sync.saving .dot{background:var(--accent);animation:pulse 1s infinite}
 .sync.saved .dot,.sync.synced .dot{background:var(--good)}
 .sync.offline .dot{background:var(--warn)}
+.sync.signin{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600;cursor:pointer}
+.sync.signin .dot{background:var(--accent-ink)}
 @keyframes pulse{50%{opacity:.3}}
 .offline-banner{display:none;background:var(--warn);color:#fff;font-size:13px;font-weight:600;
   text-align:center;padding:9px 16px;border-radius:12px;margin-bottom:16px}
@@ -522,7 +524,7 @@ tr:last-child td{border-bottom:none}
       <span class="name">Ledger</span>
     </a>
     <nav id="nav" aria-label="Main"></nav>
-    <button class="sync" id="sync" onclick="switchView('settings')" title="Sync status — open settings"><span class="dot"></span><span id="syncText">Local</span></button>
+    <button class="sync" id="sync" onclick="onSyncPillClick()" title="Sync status — open settings"><span class="dot"></span><span id="syncText">Local</span></button>
   </div>
 </header>
 
@@ -689,11 +691,14 @@ const STORAGE_KEY = 'ledger_budget_data';
 
 /* ============================================================
    GOOGLE DRIVE SYNC SETUP
-   Paste your Client ID from Google Cloud between the quotes
-   below (it ends in .apps.googleusercontent.com). Until you do,
-   the app works perfectly in local-only mode on this device.
+   The OAuth Client ID is built in so every device, even a brand-new
+   browser, can offer "Sign in with Google" straight away. It is not a
+   secret: Google only accepts it from the authorised origin
+   (https://cat-lasagna.github.io), and Drive access still needs the
+   user's own sign-in and consent. A different ID saved on a device
+   (Settings → Change Client ID) takes priority over this one.
    ============================================================ */
-const GOOGLE_CLIENT_ID = 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
+const GOOGLE_CLIENT_ID = '1045855420592-qkd9pkvlcp31i8jt98n2oflecb46lap0.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILENAME = 'budget_data.json';
 
@@ -796,7 +801,11 @@ function setSync(stateName){
   if(!el) return;
   el.className='sync '+stateName;
   const labels={saving:'Saving…',saved:'Saved ✓',synced:'Synced ✓',offline:'Offline',local:'Local only'};
-  t.textContent = labels[stateName]||'Local only';
+  // sync is set up but this device isn't signed in: the pill becomes the sign-in button
+  const needsSignIn=typeof Sync!=='undefined' && Sync.enabled && !Sync.signedIn && (stateName==='local'||stateName==='saved');
+  el.classList.toggle('signin', needsSignIn);
+  t.textContent = needsSignIn ? 'Sign in' : (labels[stateName]||'Local only');
+  el.title = needsSignIn ? 'Sign in with Google to sync' : 'Sync status — open settings';
 }
 
 /* ============================================================
@@ -4232,7 +4241,16 @@ function getToken(interactive){
   });
 }
 async function ensureFreshToken(){
-  if(!Sync.token || Date.now() > Sync.tokenExpiry-60000){ await getToken(false); }
+  if(!Sync.token || Date.now() > Sync.tokenExpiry-60000){
+    try{ await getToken(false); }
+    catch(e){ throw {tokenFailed:true, cause:e}; }   // Google wants a tap to sign in again
+  }
+}
+/* the login lapsed and Google won't renew it without a tap: say "Sign in"
+   rather than "Offline". Unsynced edits stay marked and upload after sign-in. */
+function needSignInAgain(){
+  Sync.signedIn=false; Sync.token=null; Sync.pendingPush=true;
+  showOfflineBanner(false); setSync('local'); updateSyncCard();
 }
 async function trySilentSignIn(){
   try{ await getToken(false); await loadFromDrive(); }
@@ -4242,6 +4260,12 @@ async function driveSignIn(){
   try{ await getToken(true); await loadFromDrive(); toast('Connected to Google Drive','good'); }
   catch(e){ toast('Sign-in cancelled or blocked','bad'); }
   updateSyncCard();
+}
+/* tapping the pill signs in when that's what's missing (a tap counts as the
+   user gesture Google wants before opening its sign-in window) */
+function onSyncPillClick(){
+  if(Sync.enabled && !Sync.signedIn && Sync.tokenClient){ driveSignIn(); return; }
+  switchView('settings');
 }
 function driveSignOut(){
   try{ if(Sync.token && google.accounts.oauth2.revoke) google.accounts.oauth2.revoke(Sync.token,()=>{}); }catch(e){}
@@ -4332,7 +4356,8 @@ async function loadFromDriveNow(opts){
     Sync.signedIn=true; Sync.pendingPush=false;
     setSync('synced'); showOfflineBanner(false); updateSyncCard();
   }catch(e){
-    if(e&&e.auth&&!opts.retried){ try{ await getToken(false); return loadFromDriveNow(Object.assign({},opts,{retried:true})); }catch(_){} }
+    if(e&&e.auth&&!opts.retried){ try{ await getToken(false); return loadFromDriveNow(Object.assign({},opts,{retried:true})); }catch(_){ return needSignInAgain(); } }
+    if(e&&(e.tokenFailed||e.auth)) return needSignInAgain();
     setSync('offline'); showOfflineBanner(true); updateSyncCard();
   }
 }
@@ -4361,7 +4386,8 @@ async function drivePushNow(retried){
     markSynced(data.modifiedTime, seq);
     Sync.pendingPush=false; setSync('synced'); showOfflineBanner(false);
   }catch(e){
-    if(e&&e.auth&&!retried){ try{ await getToken(false); return drivePushNow(true); }catch(_){} }
+    if(e&&e.auth&&!retried){ try{ await getToken(false); return drivePushNow(true); }catch(_){ return needSignInAgain(); } }
+    if(e&&(e.tokenFailed||e.auth)) return needSignInAgain();
     Sync.pendingPush=true; setSync('offline'); showOfflineBanner(true);
   }
   updateSyncCard();

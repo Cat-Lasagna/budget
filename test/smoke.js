@@ -42,5 +42,17 @@ for (const f of ['aggregate','creditOffset','displayAmount','buildPreview','peop
   'renderDashboard','renderInsights','renderMore','recurringCharges','topMerchants','txRowHTML','openLedgerFilters'])
   check('subsystem present: ' + f, exists(f));
 
+// a brand-new device (nothing saved) offers Google sign-in, never the Client ID form
+localStorage.removeItem('ledger_google_client_id');
+delete state.settings.googleClientId;
+check('new device: built-in Client ID is used', /^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(getClientId() || ''), getClientId());
+Sync.signedIn = false; editingClientId = false;
+updateSyncCard();
+const card = document.getElementById('syncCard').innerHTML;
+check('new device: sync card offers Sign in with Google', card.includes('Sign in with Google') && !card.includes('clientIdInput'));
+// a different ID saved on the device still wins
+localStorage.setItem('ledger_google_client_id', '999-other.apps.googleusercontent.com');
+check('saved device ID takes priority', getClientId() === '999-other.apps.googleusercontent.com');
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

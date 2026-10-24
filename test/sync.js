@@ -175,6 +175,17 @@ confirmStale = () => { staleAsked++; return Promise.resolve(true); };
   await withTimeout(doDrivePush(), 2000);
   check('stale "load newer": no second question', conflictAsked === 0 && !hasUnsynced(), { conflictAsked, u: hasUnsynced() });
 
+  // --- 9. login lapses and Google won't renew it silently: ask to sign in, keep the edit
+  setSync = (n) => { lastSync = n; };
+  let lastSync = null;
+  Sync.signedIn = true; Sync.token = null; tokenMode = 'silent'; Sync.silentTokenTimeoutMs = 50;
+  Sync.lastModified = driveModified;
+  state.settings.marker = 'after-lapse'; markUnsynced();
+  await withTimeout(doDrivePush(), 2000);
+  check('lapsed login: asks to sign in, not "offline"', Sync.signedIn === false && lastSync === 'local', { signedIn: Sync.signedIn, lastSync });
+  check('lapsed login: edit still marked unsynced', hasUnsynced() && Sync.pendingPush === true);
+  tokenMode = 'answer';
+
   console.log(`${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
