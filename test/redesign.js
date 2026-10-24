@@ -81,5 +81,23 @@ state.transactions = [T({ date: '2026-09-02', spent: 100, categoryId: cat('Gas')
 const ch = insightChanges(aggregate('2026-09', '2026-10', ['a']));
 check('changes: largest first', ch[0].parent === 'Transportation' && near(ch[0].diff, 60) && near(ch[1].diff, -30), ch);
 
+// review card: the "N similar" list matches the count on the button
+state.transactions = [
+  T({ id: 'cur', description: 'TIM HORTONS #1869 MARKHAM ON', spent: 5, flags: { needsReview: true } }),
+  T({ description: 'TIM HORTONS #22 TORONTO ON', spent: 4, categoryId: cat('Restaurant') }),
+  T({ description: 'TIM HORTONS #9 AJAX ON', spent: 3, categoryId: cat('Restaurant') }),
+  T({ description: 'TIM HORTONS #5 MARKHAM ON', spent: 6, flags: { needsReview: true } }),
+  T({ description: 'LOBLAWS #1', spent: 50, categoryId: cat('Groceries') }),
+];
+const cur = state.transactions[0];
+const kw = rankKeywords(cur.description)[0];
+const shown = keywordStats(kw).total - 1;
+const list = similarTransactions(cur, kw);
+check('similar: keyword is the merchant', /tim hortons/i.test(kw), kw);
+check('similar: list length equals the count shown', list.length === shown && shown === 3, { shown, list: list.length });
+check('similar: excludes the transaction itself', !list.some(x => x.id === 'cur'));
+check('similar: newest first', list.every((x, i) => i === 0 || list[i - 1].date >= x.date));
+check('read-only rows do not open the editor', !txRowHTML(list[0], { compact: true, readOnly: true }).includes('onclick="txRowClick'));
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

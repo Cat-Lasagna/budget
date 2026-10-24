@@ -321,6 +321,16 @@ tr:last-child td{border-bottom:none}
 .flowchart{width:100%;height:auto;display:block;margin-top:8px}
 .flowchart text{font-family:var(--sans);font-size:11px;fill:var(--ink-soft)}
 .mini-list .tx{padding-left:0;padding-right:0}
+.tx.static{cursor:default}
+.tx.static:hover{background:none}
+.similar-toggle{font:inherit;font-size:13px;color:var(--accent);background:var(--accent-soft);border:0;border-radius:20px;
+  padding:6px 12px;margin-top:10px;cursor:pointer}
+.similar-toggle b{font-weight:700}
+.similar-box{border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:16px;background:var(--paper)}
+.similar-sum{font-size:13px;color:var(--ink-soft);line-height:1.5;margin-bottom:8px}
+.similar-sum b{color:var(--ink)}
+.similar-list{max-height:260px;overflow-y:auto}
+.similar-list .tx{padding-left:0;padding-right:0}
 
 /* ============================================================
    TRANSACTIONS — grouped by day, one compact row per purchase
@@ -1609,16 +1619,54 @@ function renderReviewCard(){
       ${counterpartyOf(t)?`<div style="font-size:11.5px;color:var(--ink-soft);margin-top:3px">${esc(t.description)}</div>`:''}
       <div style="font-size:13px;color:var(--ink-soft);margin-top:6px">${esc(t.date)} · ${esc(acctName(t.accountId))}</div>
       <div style="font-family:var(--serif);font-size:30px;font-weight:600;margin-top:10px">${t.credit?'+'+money(t.credit):money(t.spent||0)}</div>
-      ${similar?`<div style="font-size:12.5px;color:var(--accent);margin-top:8px">${similar} similar transaction${similar===1?'':'s'} in your history</div>`:''}
+      ${similar?`<button type="button" class="similar-toggle" id="rq_simBtn" aria-expanded="false" aria-controls="rq_similar"
+        onclick="toggleReviewSimilar()">${similar} similar transaction${similar===1?'':'s'} in your history · <b>Show</b></button>`:''}
     </div>
+    <div id="rq_similar" hidden></div>
     <div class="field"><label>Category</label>
       <select id="rq_cat" style="padding:12px;font-size:15px">${categoryOptions(t.categoryId)}</select></div>
     <label class="checkline" style="margin-top:4px"><input type="checkbox" id="rq_rule" style="width:auto" ${similar?'checked':''}>
       <span>Also make a rule so this files itself next time</span></label>
   `, [
     {label:'Skip',cls:'btn-ghost',fn:()=>{reviewIdx++;renderReviewCard();}},
-    {label:'Save &amp; next',cls:'btn-primary',fn:saveReviewCard}
+    {label:'Save & next',cls:'btn-primary',fn:saveReviewCard}
   ]);
+}
+/* "N similar transactions": show them in place, so you can judge the
+   rule before making it without losing your spot in the queue */
+function similarTransactions(t, keyword){
+  const q=(keyword||'').toLowerCase();
+  if(!q) return [];
+  return state.transactions.filter(x=>x.id!==t.id && (x.description||'').toLowerCase().includes(q))
+    .sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+}
+function toggleReviewSimilar(){
+  const box=document.getElementById('rq_similar'), btn=document.getElementById('rq_simBtn');
+  if(!box||!btn) return;
+  const open=box.hidden;
+  box.hidden=!open;
+  btn.setAttribute('aria-expanded',String(open));
+  btn.querySelector('b').textContent=open?'Hide':'Show';
+  if(!open) return;
+  const t=state.transactions.find(x=>x.id===reviewQueue[reviewIdx]); if(!t) return;
+  const kw=rankKeywords(t.description)[0];
+  const list=similarTransactions(t, kw);
+  // how they're filed now: the most useful thing to know before a rule
+  const byCat={}; let unfiled=0, waiting=0;
+  list.forEach(x=>{ const c=catById(x.categoryId); if(c) byCat[c.id]=(byCat[c.id]||0)+1; else unfiled++; if(x.flags&&x.flags.needsReview) waiting++; });
+  const cats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+  const top=cats[0];
+  const SHOW=12;
+  box.innerHTML=`<div class="similar-box">
+    <div class="similar-sum">
+      Matching <b>“${esc(kw)}”</b>:
+      ${cats.slice(0,3).map(([id,n])=>`${n} in ${esc(catName(id))}`).join(', ')}${cats.length>3?`, ${cats.length-3} other categor${cats.length-3===1?'y':'ies'}`:''}${cats.length&&unfiled?', ':''}${unfiled?`${unfiled} without a category`:''}.
+      ${waiting?`<br>A rule would file the ${waiting} still waiting for review. Ones you already filed stay as they are.`:''}
+    </div>
+    ${top?`<button type="button" class="chip" style="margin:2px 0 10px" onclick="document.getElementById('rq_cat').value='${top[0]}'">Use ${esc(catName(top[0]))}</button>`:''}
+    <div class="similar-list">${list.slice(0,SHOW).map(x=>txRowHTML(x,{compact:true,readOnly:true})).join('')}</div>
+    ${list.length>SHOW?`<div style="font-size:12.5px;color:var(--ink-soft);margin-top:6px">Showing the latest ${SHOW} of ${list.length}.</div>`:''}
+  </div>`;
 }
 function saveReviewCard(){
   const t=state.transactions.find(x=>x.id===reviewQueue[reviewIdx]);
@@ -3012,8 +3060,9 @@ function txRowHTML(t, opts){
     :`<span class="cat-pill"><span class="swatch" style="background:${color}"></span>${esc(c.name)}</span>`;
   const who=counterpartyOf(t);
   const cls=['tx', f.needsReview?'review':'', (f.isBalancing||f.isInterAccountTransfer)?'excluded':'', sel?'selected':'', opts.compact?'compact':''].join(' ');
-  return `<div class="${cls}" tabindex="0" role="button" aria-label="${esc(name)}, ${esc(t.date)}" onclick="txRowClick(event,'${t.id}')"
-      onkeydown="if(event.key==='Enter'){event.preventDefault();openTxnEditor('${t.id}')}">
+  const open=opts.readOnly?'':` tabindex="0" role="button" aria-label="${esc(name)}, ${esc(t.date)}" onclick="txRowClick(event,'${t.id}')"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();openTxnEditor('${t.id}')}"`;
+  return `<div class="${cls}${opts.readOnly?' static':''}"${open}>
     ${opts.compact?'':`<div class="tx-check" onclick="event.stopPropagation()"><input type="checkbox" ${sel?'checked':''} aria-label="Select" onchange="ledgerToggleSel('${t.id}',this.checked)"></div>`}
     <div class="av" style="background:color-mix(in srgb,${needs?'var(--danger)':color} 16%,transparent);color:${needs?'var(--danger)':color}">${esc(initial)}<span class="tick">${icon('check')}</span></div>
     <div class="tx-main" style="min-width:0">
