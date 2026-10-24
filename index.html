@@ -1198,7 +1198,7 @@ function applyCardAssignments(r){
   state.transactions.forEach(t=>{ if(target[t.id]){ t.accountId=target[t.id]; n++; } });
   Store.save(); closeModal(); renderAccounts();
   if(currentView==='transactions') renderLedger();
-  toast(`Moved ${n} transaction${n===1?'':'s'}`,'good',{label:'Undo',fn:performUndo});
+  toast(`Moved ${n} transaction${n===1?'':'s'}`,'good',undoAction());
 }
 
 function openAccountModal(id){
@@ -1480,7 +1480,7 @@ function removeDuplicateCopies(){
       state.transactions=state.transactions.filter(t=>!ids.has(t.id));
       Store.save(); updateBadge(); runDataCheck();
       if(currentView==='transactions') renderLedger();
-      toast(`Removed ${ids.size} duplicate${ids.size===1?'':'s'}`,'good',{label:'Undo',fn:performUndo});
+      toast(`Removed ${ids.size} duplicate${ids.size===1?'':'s'}`,'good',undoAction());
     });
 }
 
@@ -1702,8 +1702,16 @@ function saveReviewCard(){
   const catId=val('rq_cat');
   const wantRule=document.getElementById('rq_rule').checked;
   if(!catId){ toast('Pick a category, or tap Skip','bad'); return; }
+  snapshotForUndo([t.id]);
+  const undo=undoAction(()=>{
+    // back to this card if the review is still open
+    const i=reviewQueue.indexOf(t.id);
+    const open=document.getElementById('overlay').classList.contains('show') && /^Review /.test(document.getElementById('modalTitle').textContent);
+    if(i>=0 && open){ reviewIdx=i; reviewDone=Math.max(0,reviewDone-1); renderReviewCard(); }
+  });
   t.categoryId=catId; t.flags=t.flags||{}; t.flags.needsReview=false;
   reviewDone++; Store.save(); updateBadge();
+  toast(`Filed as ${catName(catId)}`,'good',undo);
   const desc=t.description;
   reviewIdx++;
   if(wantRule && !categorize(desc)){
@@ -2176,7 +2184,7 @@ function deleteRuleFromAudit(id){
   snapshotRulesForUndo();
   state.truthTable=state.truthTable.filter(r=>r.id!==id);
   Store.save(); runTruthAudit(); renderTruthTable();
-  toast('Rule deleted','',{label:'Undo',fn:performUndo});
+  toast('Rule deleted','',undoAction());
 }
 function bulkDeleteAudit(kind){
   const items=(auditCache||{})[kind]||[];
@@ -2186,7 +2194,7 @@ function bulkDeleteAudit(kind){
     snapshotRulesForUndo();
     state.truthTable=state.truthTable.filter(r=>!ids.has(r.id));
     Store.save(); runTruthAudit(); renderTruthTable();
-    toast(`Deleted ${ids.size} rule${ids.size===1?'':'s'}`,'good',{label:'Undo',fn:performUndo});
+    toast(`Deleted ${ids.size} rule${ids.size===1?'':'s'}`,'good',undoAction());
   });
 }
 function acceptRuleFor(txnId){
@@ -2195,7 +2203,7 @@ function acceptRuleFor(txnId){
   snapshotForUndo([t.id]);
   t.categoryId=m.categoryId;
   Store.save(); updateBadge(); runTruthAudit();
-  toast(`Refiled as ${catName(m.categoryId)}`,'good',{label:'Undo',fn:performUndo});
+  toast(`Refiled as ${catName(m.categoryId)}`,'good',undoAction());
 }
 
 function renderSuggestedRules(){
@@ -2227,7 +2235,7 @@ function acceptSuggestion(i){
   state.truthTable.unshift({id:uid(),keyword:g.keyword,categoryId:catId,matchType:'contains'});
   const filed=applyRulesToReview();
   Store.save(); updateBadge(); auditCache=null; renderTruthTable();
-  toast(`Rule added — ${filed} transaction${filed===1?'':'s'} filed`,'good',{label:'Undo',fn:performUndo});
+  toast(`Rule added — ${filed} transaction${filed===1?'':'s'} filed`,'good',undoAction());
 }
 function dismissSuggestion(kw){
   state.settings.dismissedSuggestions=state.settings.dismissedSuggestions||[];
@@ -2332,7 +2340,7 @@ function saveRule(id,opts){
   if(currentView==='truth'){ auditCache=null; renderTruthTable(); }
   if(currentView==='transactions') renderLedger();
   toast(`Rule saved${filed?` — ${filed} more transaction${filed===1?'':'s'} filed automatically`:''}`,'good',
-    {label:'Undo',fn:performUndo});
+    undoAction());
   if(opts.onSaved) opts.onSaved();
 }
 
@@ -2367,7 +2375,7 @@ function deleteRule(id){
     snapshotRulesForUndo();
     state.truthTable=state.truthTable.filter(x=>x.id!==id);
     Store.save(); auditCache=null; renderTruthTable();
-    toast('Rule deleted','',{label:'Undo',fn:performUndo});
+    toast('Rule deleted','',undoAction());
   });
 }
 function reapplyTruth(){
@@ -2380,7 +2388,7 @@ function reapplyTruth(){
       let changed=0;
       targets.forEach(t=>{ const before=t.categoryId; autoProcess(t,{preserveManual:true}); if(t.categoryId!==before) changed++; });
       Store.save(); updateBadge(); auditCache=null; renderTruthTable();
-      toast(`Re-applied — ${changed} transaction${changed===1?'':'s'} updated`,'good',{label:'Undo',fn:performUndo});
+      toast(`Re-applied — ${changed} transaction${changed===1?'':'s'} updated`,'good',undoAction());
     });
 }
 function exportTruthCsv(){
@@ -2426,7 +2434,7 @@ function applyTruthImport(rows,replace){
   if(filed){ Store.save(); updateBadge(); }
   auditCache=null;
   toast(`Imported ${added} rule${added===1?'':'s'}${skipped?`, skipped ${skipped} duplicate${skipped===1?'':'s'}`:''}${filed?` · ${filed} review item${filed===1?'':'s'} auto-filed`:''}`,'good',
-    {label:'Undo',fn:performUndo});
+    undoAction());
 }
 
 /* ============================================================
@@ -3342,33 +3350,39 @@ function ledgerPage(d){ ledger.page+=d; renderLedger(); window.scrollTo(0,0); }
 function setTxnCategory(id,catId){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
   const wasUncategorized=!t.categoryId;
+  snapshotForUndo([id]);
   t.categoryId=catId||null;
   if(catId && t.flags) t.flags.needsReview=false;   // assigning a category clears review
   Store.save(); updateBadge(); renderLedger();
-  if(catId && wasUncategorized) maybeOfferRule(t);
+  filedToast(t, wasUncategorized, undoAction());
 }
 
-/* After you file something by hand, offer to turn it into a rule — but only
-   when it would actually help: the row had no category, no existing rule
-   covers it, and you haven't switched the prompt off. */
-function maybeOfferRule(t){
-  if(state.settings && state.settings.noRulePrompt) return;
-  if(!t || !t.categoryId || !t.description) return;
-  if(categorize(t.description)) return;              // a rule already handles this
+/* "Filed as X" with Undo, plus "Make a rule" when that would actually help:
+   the row had no category, no existing rule covers it, and the prompt
+   hasn't been switched off. */
+function ruleOfferAction(t){
+  if(state.settings && state.settings.noRulePrompt) return null;
+  if(!t || !t.categoryId || !t.description) return null;
+  if(categorize(t.description)) return null;         // a rule already handles this
   const chips=rankKeywords(t.description);
-  if(!chips.length) return;
-  const kw=chips[0];
-  const s=keywordStats(kw);
+  if(!chips.length) return null;
+  const s=keywordStats(chips[0]);
   const others=s?Math.max(0,s.total-1):0;
-  toast(`Filed as ${catName(t.categoryId)}`,'good',{
-    label: others?`Make a rule (${others} similar)`:'Make a rule',
-    fn:()=>openRuleModal(null,{fromDescription:t.description, categoryId:t.categoryId})
-  });
+  return { label: others?`Make a rule (${others} similar)`:'Make a rule',
+    fn:()=>openRuleModal(null,{fromDescription:t.description, categoryId:t.categoryId}) };
+}
+function filedToast(t, offerRule, undo){
+  const actions=[undo];
+  const r=offerRule?ruleOfferAction(t):null; if(r) actions.push(r);
+  toast(t.categoryId?`Filed as ${catName(t.categoryId)}`:'Category removed','good',actions);
 }
 function toggleTxnFlag(id,key){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
+  snapshotForUndo([id]);
   t.flags=t.flags||{}; t.flags[key]=!t.flags[key];
   Store.save(); updateBadge(); renderLedger();
+  const fd=FLAG_DEFS.find(f=>f.key===key);
+  toast(`${t.flags[key]?'Marked':'Unmarked'}: ${fd?fd.label:key}`,'good',undoAction());
 }
 
 /* row editor for the fields that aren't inline */
@@ -3450,7 +3464,8 @@ function updateRepaySummary(){
 }
 function saveTxnEdit(id){
   const t=state.transactions.find(x=>x.id===id); if(!t) return;
-  const wasUncategorized=!t.categoryId;
+  const wasUncategorized=!t.categoryId, catBefore=t.categoryId;
+  snapshotForUndo([id]);
   t.date=val('e_date'); t.accountId=val('e_acct'); t.description=val('e_desc');
   let sp=toNum(val('e_spent')), cr=toNum(val('e_credit'));
   if(sp<0){ cr+=-sp; sp=0; }          // a negative debit is a credit
@@ -3469,8 +3484,8 @@ function saveTxnEdit(id){
   FLAG_DEFS.forEach(fd=>{ t.flags[fd.key]=document.getElementById('e_'+fd.key).checked; });
   t.originalCurrencyString=detectForeign(t.description);
   Store.save(); updateBadge(); closeModal(); renderLedger();
-  if(t.categoryId && wasUncategorized) maybeOfferRule(t);
-  else toast('Transaction updated','good');
+  if(t.categoryId && t.categoryId!==catBefore) filedToast(t, wasUncategorized, undoAction());
+  else toast('Transaction updated','good',undoAction());
 }
 function deleteTxn(id){
   confirmDialog('Delete transaction','Delete this transaction?',()=>{
@@ -3478,7 +3493,7 @@ function deleteTxn(id){
     state.transactions=state.transactions.filter(x=>x.id!==id);
     ledger.selected.delete(id);
     Store.save(); updateBadge(); renderLedger();
-    toast('Transaction deleted','',{label:'Undo',fn:performUndo});
+    toast('Transaction deleted','',undoAction());
   });
 }
 
@@ -3586,7 +3601,7 @@ function applySplit(){
   });
   state.transactions.splice(idx,1,...children);
   Store.save(); updateBadge(); closeModal(); renderLedger();
-  toast(`Split into ${children.length} parts`,'good',{label:'Undo',fn:performUndo});
+  toast(`Split into ${children.length} parts`,'good',undoAction());
 }
 function mergeSplit(id){
   const t=state.transactions.find(x=>x.id===id); if(!t||!t.splitOf) return;
@@ -3614,7 +3629,7 @@ function mergeSplit(id){
   state.transactions=state.transactions.filter(x=>x.splitOf!==t.splitOf);
   state.transactions.splice(Math.max(0,idx),0,merged);
   Store.save(); updateBadge(); closeModal(); renderLedger();
-  toast('Split merged back','good',{label:'Undo',fn:performUndo});
+  toast('Split merged back','good',undoAction());
 }
 
 /* selection + bulk actions */
@@ -3656,7 +3671,7 @@ function bulkMoveAccount(){
   snapshotForUndo(ledger.selected);
   state.transactions.forEach(t=>{ if(ledger.selected.has(t.id)) t.accountId=acctId; });
   Store.save(); ledger.selected.clear(); renderLedger();
-  toast(`Moved ${n} transaction${n===1?'':'s'} to ${acctName(acctId)}`,'good',{label:'Undo',fn:performUndo});
+  toast(`Moved ${n} transaction${n===1?'':'s'} to ${acctName(acctId)}`,'good',undoAction());
 }
 function bulkAssignCat(){
   const catId=document.getElementById('bulkCat').value;
@@ -3665,19 +3680,19 @@ function bulkAssignCat(){
   snapshotForUndo(ledger.selected);
   state.transactions.forEach(t=>{ if(ledger.selected.has(t.id)){ t.categoryId=catId; if(t.flags) t.flags.needsReview=false; } });
   Store.save(); updateBadge(); ledger.selected.clear(); renderLedger();
-  toast(`Assigned to ${n} transaction${n===1?'':'s'}`,'good',{label:'Undo',fn:performUndo});
+  toast(`Assigned to ${n} transaction${n===1?'':'s'}`,'good',undoAction());
 }
 function bulkWorkExpense(){
   snapshotForUndo(ledger.selected);
   state.transactions.forEach(t=>{ if(ledger.selected.has(t.id)){ t.flags=t.flags||{}; t.flags.workExpense=true; } });
   Store.save(); ledger.selected.clear(); renderLedger();
-  toast('Marked as work expense','good',{label:'Undo',fn:performUndo});
+  toast('Marked as work expense','good',undoAction());
 }
 function bulkLentOut(){
   snapshotForUndo(ledger.selected);
   state.transactions.forEach(t=>{ if(ledger.selected.has(t.id)){ t.flags=t.flags||{}; t.flags.lentOut=true; } });
   Store.save(); ledger.selected.clear(); renderLedger();
-  toast('Marked as lent out','good',{label:'Undo',fn:performUndo});
+  toast('Marked as lent out','good',undoAction());
 }
 function bulkDelete(){
   const n=ledger.selected.size;
@@ -3685,7 +3700,7 @@ function bulkDelete(){
     snapshotForUndo(ledger.selected);
     state.transactions=state.transactions.filter(t=>!ledger.selected.has(t.id));
     ledger.selected.clear(); Store.save(); updateBadge(); renderLedger();
-    toast(`Deleted ${n}`,'',{label:'Undo',fn:performUndo});
+    toast(`Deleted ${n}`,'',undoAction());
   });
 }
 
@@ -4615,7 +4630,7 @@ function deleteAllTransactions(){
     'DELETE',
     ()=>{ snapshotAllForUndo(); state.transactions=[]; ledger.selected.clear(); ledger.page=1; Store.save(); updateBadge();
       if(currentView==='transactions') renderLedger(); else switchView('dashboard');
-      toast('All transactions deleted','',{label:'Undo',fn:performUndo}); });
+      toast('All transactions deleted','',undoAction()); });
 }
 function wipeAllData(){
   typedConfirm('Erase everything',
@@ -4628,35 +4643,44 @@ function toast(msg,kind,action){
   const t=document.createElement('div');
   t.className='toast'+(kind?' '+kind:'');
   t.textContent=(kind==='good'?'✓ ':kind==='bad'?'⚠ ':'')+msg;
-  if(action){
+  (Array.isArray(action)?action:(action?[action]:[])).forEach(a=>{
     const b=document.createElement('button');
-    b.textContent=action.label; b.setAttribute('aria-label',action.label);
-    b.style.cssText='font:inherit;font-weight:700;background:none;border:none;color:inherit;text-decoration:underline;cursor:pointer;padding:0 2px';
-    b.onclick=()=>{ action.fn(); t.remove(); };
+    b.textContent=a.label; b.setAttribute('aria-label',a.label);
+    b.style.cssText='font:inherit;font-weight:700;background:none;border:none;color:inherit;text-decoration:underline;cursor:pointer;padding:0 2px;white-space:nowrap';
+    b.onclick=()=>{ t.remove(); a.fn(); };
     t.appendChild(b);
-  }
+  });
   document.getElementById('toasts').appendChild(t);
   setTimeout(()=>{ t.style.opacity='0'; t.style.transition='.3s'; setTimeout(()=>t.remove(),300); }, action?6000:2600);
 }
 
 /* one-level undo: snapshot the affected transactions before a bulk change */
-let undoState=null;
+let undoState=null, undoSeq=0;
 function snapshotForUndo(ids){
   const set=ids instanceof Set?ids:new Set(ids);
-  undoState={ all:false, items: state.transactions.filter(t=>set.has(t.id)).map(t=>JSON.parse(JSON.stringify(t))) };
+  undoState={ all:false, token:++undoSeq, items: state.transactions.filter(t=>set.has(t.id)).map(t=>JSON.parse(JSON.stringify(t))) };
 }
 function snapshotAllForUndo(){
-  undoState={ all:true, items: JSON.parse(JSON.stringify(state.transactions)) };
+  undoState={ all:true, token:++undoSeq, items: JSON.parse(JSON.stringify(state.transactions)) };
+}
+/* the Undo button for the change just snapshotted. Only one level of undo
+   is kept, so an older message's Undo must not undo a newer change. */
+function undoAction(after){
+  const tok=undoState&&undoState.token;
+  return {label:'Undo', fn:()=>{ if(performUndo(tok)!==false && after) after(); }};
 }
 /* rule changes can refile hundreds of transactions at once, so snapshot
    the rules AND every transaction before they run */
 function snapshotRulesForUndo(){
-  undoState={ full:true,
+  undoState={ full:true, token:++undoSeq,
     truthTable: JSON.parse(JSON.stringify(state.truthTable)),
     items: JSON.parse(JSON.stringify(state.transactions)) };
 }
-function performUndo(){
-  if(!undoState) return;
+function performUndo(tok){
+  if(tok!==undefined && (!undoState || undoState.token!==tok)){
+    toast("That change can't be undone any more. Undo only goes back one step.",'bad'); return false;
+  }
+  if(!undoState) return false;
   if(undoState.full){
     state.truthTable=undoState.truthTable;
     state.transactions=undoState.items;

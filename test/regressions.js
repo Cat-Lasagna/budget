@@ -91,5 +91,40 @@ check('re-apply: blank filed', byId('blank2').categoryId === rest);
 check('re-apply: category kept', byId('hasCat2').categoryId === gro);
 check('re-apply: work-flagged row untouched', byId('work2').categoryId === null);
 
+// --- Undo on single-transaction changes, and an old message can't undo a newer change
+let toasts = [];
+toast = (m, k, a) => { toasts.push({ m, k, a: Array.isArray(a) ? a : (a ? [a] : []) }); };
+const undoOf = tt => tt.a.find(x => x.label === 'Undo');
+state.truthTable = [];
+state.transactions = [
+  { id: 'u1', accountId: 'a1', date: '2026-05-10', description: 'NEW SHOP', spent: 10, credit: 0, categoryId: null, adjusted: null, flags: { needsReview: true } },
+  { id: 'u2', accountId: 'a1', date: '2026-05-11', description: 'OTHER SHOP', spent: 20, credit: 0, categoryId: null, adjusted: null, flags: { needsReview: true } },
+];
+const U = id => state.transactions.find(t => t.id === id);
+toasts = [];
+setTxnCategory('u1', gro);
+const filedMsg = toasts[toasts.length - 1];
+check('category: "Filed as" message shown', /Filed as Groceries/.test(filedMsg.m), filedMsg.m);
+check('category: message has Undo', !!undoOf(filedMsg));
+check('category: message still offers a rule', filedMsg.a.some(x => /Make a rule/.test(x.label)), filedMsg.a.map(x => x.label));
+undoOf(filedMsg).fn();
+check('category: Undo puts it back', U('u1').categoryId === null && U('u1').flags.needsReview === true);
+
+toggleTxnFlag('u1', 'workExpense');
+const flagMsg = toasts[toasts.length - 1];
+check('flag: message with Undo', /Marked: Work expense/.test(flagMsg.m) && !!undoOf(flagMsg), flagMsg.m);
+undoOf(flagMsg).fn();
+check('flag: Undo clears it', !U('u1').flags.workExpense);
+
+// two changes: the first message's Undo must not undo the second change
+setTxnCategory('u1', gro); const first = toasts[toasts.length - 1];
+setTxnCategory('u2', rest); const second = toasts[toasts.length - 1];
+toasts = [];
+undoOf(first).fn();
+check('stale Undo: refuses and says why', toasts.some(x => x.k === 'bad' && /can't be undone/.test(x.m)), toasts.map(x => x.m));
+check('stale Undo: newer change untouched', U('u2').categoryId === rest && U('u1').categoryId === gro);
+undoOf(second).fn();
+check('current Undo still works', U('u2').categoryId === null);
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
