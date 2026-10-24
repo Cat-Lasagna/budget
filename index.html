@@ -773,8 +773,26 @@ const Store = {
     this.saveLocalOnly();
     markUnsynced();
     scheduleDrivePush();
+    scheduleLiveCounts();
   }
 };
+
+/* Counts on screen follow the data: after any change, refresh the tab
+   badge, the Home summary and the review chip without a reload. Batched
+   to one update per frame however many saves happen together. */
+let liveCountsQueued=false;
+function scheduleLiveCounts(){
+  if(liveCountsQueued) return;
+  liveCountsQueued=true;
+  const run=()=>{ liveCountsQueued=false; refreshLiveCounts(); };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(run); else setTimeout(run,0);
+}
+function refreshLiveCounts(){
+  updateBadge();
+  if(currentView==='dashboard') renderDashboard();
+  const chip=document.getElementById('chipReview');
+  if(chip) chip.textContent=`Needs review · ${state.transactions.filter(t=>t.flags&&t.flags.needsReview).length}`;
+}
 
 /* ---- changes Drive hasn't received yet ---------------------------------
    Kept in this device's storage, so it survives closing the tab. Without it,
@@ -3249,7 +3267,7 @@ function ledgerPanelFilterCount(){
 function renderLedgerFilters(){
   const reviewN=state.transactions.filter(t=>t.flags&&t.flags.needsReview).length;
   const m=latestMonth();
-  const chip=(on,label,onclick,cls)=>`<button class="chip ${cls||''} ${on?'on':''}" aria-pressed="${!!on}" onclick="${onclick}">${label}</button>`;
+  const chip=(on,label,onclick,cls,id)=>`<button class="chip ${cls||''} ${on?'on':''}"${id?` id="${id}"`:''} aria-pressed="${!!on}" onclick="${onclick}">${label}</button>`;
   const removable=(label,clear)=>`<button class="chip on" onclick="${clear};ledger.page=1;renderLedger()" aria-label="Remove filter ${esc(label)}">${esc(label)} ×</button>`;
   const fl=FLAG_DEFS.concat([{key:'__credit__',label:'Has a refund'},{key:'__shared__',label:'Partly paid back'},{key:'__no_etransfer__',label:'No e-transfers'}]).find(x=>x.key===ledger.flag);
   const any=ledger.search||ledger.accountId||ledger.parent||ledger.sub||ledger.flag||ledger.from||ledger.to||ledger.person||ledger.needsReview||ledger.needsCategory;
@@ -3261,7 +3279,7 @@ function renderLedgerFilters(){
         style="${ledger.selectMode?'background:var(--accent);color:var(--accent-ink)':''}">${icon('select')}</button>
     </div>
     <div class="chips">
-      ${reviewN||ledger.needsReview?chip(ledger.needsReview,`Needs review · ${reviewN}`,"ledger.needsReview=!ledger.needsReview;ledger.page=1;renderLedger()",'warn'):''}
+      ${reviewN||ledger.needsReview?chip(ledger.needsReview,`Needs review · ${reviewN}`,"ledger.needsReview=!ledger.needsReview;ledger.page=1;renderLedger()",'warn','chipReview'):''}
       ${chip(ledgerMonthChipOn(),monthLabel(m,{noYear:m.slice(0,4)===todayStr().slice(0,4)}),'toggleLedgerMonth()')}
       ${state.accounts.map(a=>chip(ledger.accountId===a.id,esc(a.name),`ledger.accountId=ledger.accountId==='${a.id}'?'':'${a.id}';ledger.page=1;renderLedger()`)).join('')}
       ${ledger.needsCategory?removable('No category',"ledger.needsCategory=false"):''}
@@ -4481,6 +4499,47 @@ function ensureMigrations(){
 }
 
 try{ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{ if(currentView==='insights') renderCharts(); }); }catch(e){}
+/* ---- changes from other devices --------------------------------------
+   Each device loads Drive at launch. To keep several open devices in step,
+   check Drive when the app comes back into view and once a minute while
+   it's visible, and quietly load a newer copy. Only when it's safe: this
+   device has nothing unsynced and no dialog is open (an open editor holds
+   a transaction that a reload would replace). */
+const REMOTE_CHECK_MS=60000;
+let lastRemoteCheck=0;
+function remoteCheckIsSafe(){
+  if(!Sync.enabled || !Sync.signedIn || !Sync.fileId) return false;
+  if(hasUnsynced() || Sync.pendingPush || pushQueued) return false;
+  if(typeof document!=='undefined' && document.hidden) return false;
+  const ov=document.getElementById('overlay');
+  if(ov && ov.classList && ov.classList.contains('show')) return false;
+  return true;
+}
+function checkForRemoteChanges(force){
+  if(!force && Date.now()-lastRemoteCheck<15000) return Promise.resolve(false);   // focus + visibility fire together
+  if(!remoteCheckIsSafe()) return Promise.resolve(false);
+  lastRemoteCheck=Date.now();
+  return withDriveLock(async()=>{
+    if(!remoteCheckIsSafe()) return false;          // something changed while waiting in line
+    try{
+      await ensureFreshToken();
+      const meta=await (await driveFetch(`/drive/v3/files/${Sync.fileId}?fields=modifiedTime`)).json();
+      if(!meta.modifiedTime || meta.modifiedTime===Sync.lastModified) return false;
+      if(!remoteCheckIsSafe()) return false;
+      await loadFromDriveNow();
+      toast('Updated with changes from another device','good');
+      return true;
+    }catch(e){
+      if(e&&(e.tokenFailed||e.auth)) needSignInAgain();
+      return false;                                 // offline: try again next time
+    }
+  });
+}
+try{
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden) checkForRemoteChanges(); });
+  window.addEventListener('focus',()=>checkForRemoteChanges());
+  setInterval(()=>checkForRemoteChanges(true), REMOTE_CHECK_MS);
+}catch(e){}
 window.addEventListener('online', ()=>{ showOfflineBanner(false); if(Sync.pendingPush) scheduleDrivePush(); });
 window.addEventListener('offline', ()=>{ if(Sync.signedIn){ setSync('offline'); showOfflineBanner(true); } });
 

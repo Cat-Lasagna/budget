@@ -186,6 +186,36 @@ confirmStale = () => { staleAsked++; return Promise.resolve(true); };
   check('lapsed login: edit still marked unsynced', hasUnsynced() && Sync.pendingPush === true);
   tokenMode = 'answer';
 
+  // --- 10. another device saved: an open device picks it up, but only when safe
+  global.fetch = realFetch; tokenMode = 'answer';
+  Sync.enabled = true; Sync.signedIn = true; Sync.token = 'tok'; Sync.tokenExpiry = Date.now() + 3600e3; Sync.fileId = 'f1';
+  Sync.pendingPush = false; clearUnsynced();
+  const remote = JSON.parse(driveBody); remote.transactions = [{ id: 'fromPhone', date: '2026-10-23', description: 'FILED ON PHONE', spent: 9, credit: 0, flags: {} }];
+  driveBody = JSON.stringify(remote); driveModified = 'phone-edit'; Sync.lastModified = 'older';
+  const ov = document.getElementById('overlay'); ov.classList.contains = () => true;            // a dialog is open
+  let picked = await withTimeout(checkForRemoteChanges(true), 2000);
+  check('remote: not loaded while a dialog is open', picked.v === false && !state.transactions.some(t => t.id === 'fromPhone'));
+  ov.classList.contains = () => false;
+  markUnsynced();                                                                                // local edit waiting
+  picked = await withTimeout(checkForRemoteChanges(true), 2000);
+  check('remote: not loaded over unsynced local edits', picked.v === false && !state.transactions.some(t => t.id === 'fromPhone'));
+  clearUnsynced();
+  picked = await withTimeout(checkForRemoteChanges(true), 2000);
+  check('remote: newer copy from another device is loaded', picked.v === true && state.transactions.some(t => t.id === 'fromPhone'), picked);
+  check('remote: now in step with Drive', Sync.lastModified === 'phone-edit' && !hasUnsynced());
+  picked = await withTimeout(checkForRemoteChanges(true), 2000);
+  check('remote: nothing new, nothing loaded', picked.v === false);
+
+  // --- 11. counts follow the data without a reload
+  let dashRenders = 0; const realRenderDash = renderDashboard; renderDashboard = () => { dashRenders++; };
+  currentView = 'dashboard';
+  state.transactions.push({ id: 'n1', date: '2026-10-23', description: 'X', spent: 1, credit: 0, flags: { needsReview: true } });
+  Store.save(); await wait(30);
+  check('live counts: saving refreshes Home', dashRenders === 1, dashRenders);
+  Store.save(); Store.save(); Store.save(); await wait(30);
+  check('live counts: several saves, one refresh', dashRenders === 2, dashRenders);
+  renderDashboard = realRenderDash;
+
   console.log(`${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
