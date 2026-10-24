@@ -331,6 +331,8 @@ tr:last-child td{border-bottom:none}
 .similar-sum b{color:var(--ink)}
 .similar-list{max-height:260px;overflow-y:auto}
 .similar-list .tx{padding-left:0;padding-right:0}
+.tx-name.kw-desc{white-space:normal;overflow:visible;text-overflow:clip;font-weight:500;font-size:13.5px;word-break:break-word}
+.kw-desc mark{background:var(--accent-soft);color:var(--accent);font-weight:700;border-radius:3px;padding:0 1px}
 
 /* ============================================================
    TRANSACTIONS — grouped by day, one compact row per purchase
@@ -1910,17 +1912,65 @@ function renderKeywordStats(targetId, kw, excludeRuleId){
     ` <a href="#" style="color:var(--accent)" onclick="previewFromRuleModal(${JSON.stringify(kw).replace(/"/g,'&quot;')},'${excludeRuleId||''}');return false">see them</a>`+
     (s.shadowedBy?`<div style="color:var(--warn);margin-top:4px">⚠️ An earlier rule "${esc(s.shadowedBy.keyword)}" already catches these — it wins unless you move this one above it.</div>`:'');
 }
+/* every transaction a keyword matches, newest first, so a rule can be
+   judged on the whole picture. Big lists are drawn in chunks. */
+let kwPreview={hits:[], q:'', show:'all', token:0};
 function previewKeywordMatches(kw, onBack){
-  const q=(kw||'').toLowerCase();
-  const hits=state.transactions.filter(t=>(t.description||'').toLowerCase().includes(q)).slice(0,25);
-  setModal(`Transactions matching "${kw}"`,
-    hits.length?`<div style="max-height:50vh;overflow:auto">${hits.map(t=>`<div style="padding:7px 0;border-bottom:1px solid var(--line)">
-      <div style="font-size:14px">${esc(t.description)}</div>
-      <div style="font-size:12px;color:var(--ink-soft)">${esc(t.date)} · ${money(t.spent||0)} · ${esc(catName(t.categoryId)||'Uncategorized')}</div></div>`).join('')}</div>
-      ${state.transactions.filter(t=>(t.description||'').toLowerCase().includes(q)).length>25?'<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px">Showing the first 25.</p>':''}`
+  const q=(kw||'').trim().toLowerCase();
+  const hits=q?state.transactions.filter(t=>(t.description||'').toLowerCase().includes(q))
+    .sort((a,b)=>(b.date||'').localeCompare(a.date||'')):[];
+  kwPreview={hits, q, show:'all', token:kwPreview.token+1};
+  const waiting=hits.filter(t=>t.flags&&t.flags.needsReview&&ruleMayFile(t)).length;
+  const filed=hits.filter(t=>catById(t.categoryId)).length;
+  const byCat={}; hits.forEach(t=>{ const c=catById(t.categoryId); if(c) byCat[c.id]=(byCat[c.id]||0)+1; });
+  const cats=Object.entries(byCat).sort((x,y)=>y[1]-x[1]);
+  const unfiled=hits.length-filed;
+  setModal(`Matches for “${kw}”`,
+    hits.length?`<div class="similar-sum" style="margin-bottom:10px">
+        <b>${hits.length.toLocaleString('en-CA')}</b> transaction${hits.length===1?'':'s'} contain “${esc(kw)}”:
+        ${cats.slice(0,3).map(([id,n])=>`${n} in ${esc(catName(id))}`).join(', ')}${cats.length>3?`, ${cats.length-3} other categor${cats.length-3===1?'y':'ies'}`:''}${cats.length&&unfiled?', ':''}${unfiled?`${unfiled} without a category`:''}.
+        <br>${waiting?`The rule would file the ${waiting} still waiting for a category.`:'The rule would not change any of these.'} Anything already filed, or marked work, lent or transfer, stays as it is.
+      </div>
+      <div class="chips" style="padding-top:0;margin-bottom:8px" id="kwChips"></div>
+      <div class="similar-list" id="kwList" style="max-height:55vh"></div>`
     :'<p>No transactions match that keyword.</p>',
     onBack?[{label:'← Back to rule',cls:'btn-primary',fn:onBack}]
           :[{label:'Close',cls:'btn-primary',fn:closeModal}]);
+  if(hits.length) renderKwPreview();
+}
+function renderKwPreview(show){
+  if(show) kwPreview.show=show;
+  const {hits,q}=kwPreview;
+  const isWaiting=t=>!catById(t.categoryId);
+  const counts={all:hits.length, waiting:hits.filter(isWaiting).length, filed:hits.filter(t=>!isWaiting(t)).length};
+  const list=kwPreview.show==='waiting'?hits.filter(isWaiting):kwPreview.show==='filed'?hits.filter(t=>!isWaiting(t)):hits;
+  const chip=(k,label)=>counts[k]||k==='all'?`<button class="chip ${kwPreview.show===k?'on':''}" aria-pressed="${kwPreview.show===k}" onclick="renderKwPreview('${k}')">${label} · ${counts[k]}</button>`:'';
+  document.getElementById('kwChips').innerHTML=chip('all','All')+chip('waiting','No category')+chip('filed','Already filed');
+  // show where the keyword sits in the statement text
+  const mark=d=>{ const s=d||'', i=s.toLowerCase().indexOf(q); if(i<0||!q) return esc(s);
+    return esc(s.slice(0,i))+'<mark>'+esc(s.slice(i,i+q.length))+'</mark>'+esc(s.slice(i+q.length)); };
+  const row=t=>{
+    const c=catById(t.categoryId);
+    const color=c?parentHex(c.parent,PARENT_ORDER.indexOf(c.parent)):'var(--danger)';
+    return `<div class="tx compact static">
+      <div class="av" style="background:color-mix(in srgb,${color} 16%,transparent);color:${color}">${esc((txDisplayName(t).match(/[A-Za-z0-9]/)||['•'])[0].toUpperCase())}</div>
+      <div style="min-width:0"><div class="tx-name kw-desc">${mark(t.description)}</div>
+        <div class="tx-meta">${c?`<span class="cat-pill"><span class="swatch" style="background:${color}"></span>${esc(c.name)}</span>`
+          :'<span class="cat-pill need"><span class="swatch" style="background:var(--danger)"></span>No category</span>'}
+          <span>· ${esc(dayLabel(t.date))} · ${esc(acctName(t.accountId))}</span></div></div>
+      <div class="tx-amt">${txAmountHTML(t)}</div></div>`;
+  };
+  const box=document.getElementById('kwList');
+  const token=++kwPreview.token, CHUNK=300;
+  box.innerHTML=list.slice(0,CHUNK).map(row).join('');
+  box.scrollTop=0;
+  let i=CHUNK;
+  const more=()=>{
+    if(token!==kwPreview.token || !document.getElementById('kwList')) return;   // the list was redrawn or closed
+    box.insertAdjacentHTML('beforeend', list.slice(i,i+CHUNK).map(row).join(''));
+    i+=CHUNK; if(i<list.length) setTimeout(more,0);
+  };
+  if(i<list.length) setTimeout(more,0);
 }
 /* viewing matches from inside the rule dialog must not lose what you typed */
 function previewFromRuleModal(kw,id){
